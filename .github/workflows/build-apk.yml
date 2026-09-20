@@ -16,7 +16,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: "1. Checkout Clean Repository"
+      - name: "1. Checkout Repository"
         uses: actions/checkout@v4
 
       - name: "2. Setup Node.js 24 Environment"
@@ -54,20 +54,48 @@ jobs:
               if (pkg.dependencies && pkg.dependencies["expo-dev-client"]) delete pkg.dependencies["expo-dev-client"];
               if (pkg.devDependencies && pkg.devDependencies["expo-dev-client"]) delete pkg.devDependencies["expo-dev-client"];
               fs.writeFileSync("package.json", JSON.stringify(pkg, null, 2));
-              console.log("Purged expo-dev-client dependencies cleanly.");
+              console.log("Purged expo-dev-client dependencies.");
             }
           '
 
-      - name: "8. Stage Brand Assets (Icons, Welcome Artwork & Splash)"
+      - name: "8. Patch app.json (Rename to Deducia & Enforce Black Bootsplash)"
+        run: |
+          node -e '
+            const fs = require("fs");
+            if (fs.existsSync("app.json")) {
+              const app = JSON.parse(fs.readFileSync("app.json", "utf8"));
+              const expo = app.expo || app;
+
+              expo.name = "Deducia";
+              expo.slug = "deducia";
+
+              if (expo.splash) {
+                expo.splash.backgroundColor = "#000000";
+              }
+
+              if (Array.isArray(expo.plugins)) {
+                expo.plugins.forEach(p => {
+                  if (Array.isArray(p) && p[0] === "@zoontek/react-native-bootsplash") {
+                    if (p[1]) {
+                      p[1].bg = "#000000";
+                      if (p[1].android && p[1].android.dark) {
+                        p[1].android.dark.bg = "#000000";
+                      }
+                    }
+                  }
+                });
+              }
+
+              fs.writeFileSync("app.json", JSON.stringify(app, null, 2));
+              console.log("Successfully rebranded app.json to Deducia with #000000 splash.");
+            }
+          '
+
+      - name: "9. Stage Brand Assets (Fox Logo, Welcome Artwork & Bootsplash)"
         run: |
           mkdir -p assets
 
-          if [ -f "deducia-welcome.png" ]; then
-            cp -f deducia-welcome.png assets/deducia-welcome.png
-          elif [ -f "deduciawelcome.png" ]; then
-            cp -f deduciawelcome.png assets/deducia-welcome.png
-          fi
-
+          # 1. Identify logo
           LOGO_SRC=""
           for candidate in ic_launcher.png IC_launcher.png ic.png IC.png logo.png LOGO.png deducia-logo.png; do
             if [ -f "$candidate" ]; then
@@ -81,7 +109,7 @@ jobs:
           fi
 
           if [ -n "$LOGO_SRC" ] && [ -f "$LOGO_SRC" ]; then
-            echo "Using logo source: $LOGO_SRC"
+            echo "Applying Fox logo from: $LOGO_SRC"
             cp -f "$LOGO_SRC" assets/icon.png
             cp -f "$LOGO_SRC" assets/splash.png
             cp -f "$LOGO_SRC" assets/bootsplash_logo.png
@@ -89,7 +117,13 @@ jobs:
             find assets -type f \( -name "*icon*.png" -o -name "*splash*.png" -o -name "*bootsplash*" \) -exec cp -f "$LOGO_SRC" "{}" \;
           fi
 
-      - name: "9. Generate Standalone Google Services Configuration"
+          # 2. Stage welcome artwork
+          if [ -f "deducia-welcome.png" ]; then
+            cp -f deducia-welcome.png assets/deducia-welcome.png
+            find assets -type f \( -iname "*wallpaper*" -o -iname "*welcome*" -o -iname "*signin*" -o -iname "*signup*" -o -iname "*park*" \) -exec cp -f deducia-welcome.png "{}" \;
+          fi
+
+      - name: "10. Generate Google Services Configuration"
         run: |
           node -e '
             const fs = require("fs");
@@ -124,12 +158,12 @@ jobs:
             };
 
             fs.writeFileSync("google-services.json", JSON.stringify(dummyGoogleServices, null, 2));
-            console.log("Generated valid google-services.json for package:", pkgName);
+            console.log("Generated google-services.json for:", pkgName);
           '
 
-      - name: "10. Apply Unified Deducia Master Patches"
+      - name: "11. Apply Safe Code Patches (PDS Lock, Content Filter & Black Palette)"
         run: |
-          cat << 'EOF' > patch_master.js
+          cat << 'EOF' > patch_safe.js
           const fs = require('fs');
           const path = require('path');
 
@@ -145,27 +179,7 @@ jobs:
             });
           }
 
-          // A. Load Fox Logo as Base64 data URI
-          let logoBase64 = '';
-          for (const f of ['ic_launcher.png', 'deducia-logo.png', 'ic.png', 'logo.png']) {
-            if (fs.existsSync(f)) {
-              logoBase64 = 'data:image/png;base64,' + fs.readFileSync(f).toString('base64');
-              console.log('Loaded Fox logo Base64 from:', f);
-              break;
-            }
-          }
-
-          // B. Load Welcome Artwork as Base64 data URI
-          let welcomeBase64 = '';
-          for (const f of ['deducia-welcome.png', 'assets/deducia-welcome.png', 'deduciawelcome.png']) {
-            if (fs.existsSync(f)) {
-              welcomeBase64 = 'data:image/png;base64,' + fs.readFileSync(f).toString('base64');
-              console.log('Loaded welcome artwork Base64 from:', f);
-              break;
-            }
-          }
-
-          // C. Patch Constants (Lock PDS while keeping Public AppView alive to prevent boot freezes)
+          // A. Lock PDS Endpoint and Sanitize URLs in constants.ts
           walk('src/lib', (full, file) => {
             if (/constants\.(ts|js)$/.test(file)) {
               let code = fs.readFileSync(full, 'utf8');
@@ -183,7 +197,43 @@ jobs:
             }
           });
 
-          // D. Bypass Age Assurance Checks
+          // B. Safe Content Isolation (deducia.com handles only)
+          walk('src/state/queries', (full, file) => {
+            if (file === 'post-feed.ts' || file === 'post-feed.js') {
+              let code = fs.readFileSync(full, 'utf8');
+              if (!code.includes('isDeduciaHandle')) {
+                const helper = `
+                  function isDeduciaHandle(handle?: string): boolean {
+                    if (!handle) return false;
+                    return handle.endsWith(".deducia.com") || handle === "deducia.com";
+                  }
+                `;
+                code = helper + code;
+                code = code.replace(/res\.feed/g, 'res.feed.filter(item => isDeduciaHandle(item?.post?.author?.handle))');
+                fs.writeFileSync(full, code);
+                console.log('Injected content isolation into post-feed.ts');
+              }
+            } else if (file === 'actor-search.ts' || file === 'actor-search.js') {
+              let code = fs.readFileSync(full, 'utf8');
+              if (!code.includes('isDeduciaHandle')) {
+                const helper = `
+                  function isDeduciaHandle(handle?: string): boolean {
+                    if (!handle) return false;
+                    return handle.endsWith(".deducia.com") || handle === "deducia.com";
+                  }
+                `;
+                code = helper + code;
+                code = code.replace(/res\.actors/g, 'res.actors.filter(actor => isDeduciaHandle(actor?.handle))');
+                fs.writeFileSync(full, code);
+              }
+            } else if (file === 'suggested-follows.ts' || file === 'suggested-follows.js') {
+              let code = fs.readFileSync(full, 'utf8');
+              code = code.replace(/data\.suggestions/g, '[]');
+              fs.writeFileSync(full, code);
+            }
+          });
+
+          // C. Bypass Age Assurance
           walk('src', (full, file) => {
             if (full.includes('ageAssurance') && (file === 'state.ts' || file === 'state.tsx')) {
               const cleanMock = `
@@ -216,7 +266,7 @@ jobs:
             }
           });
 
-          // E. Solid OLED Black Palette & Monochrome Buttons
+          // D. OLED Pure Black Palette & White Button Accents (Tokens only, no runtime mutation)
           walk('src/alf', (full, file) => {
             if (file === 'tokens.ts') {
               let tokens = fs.readFileSync(full, 'utf8');
@@ -229,92 +279,16 @@ jobs:
               tokens = tokens.replace(/slate_800:\s*['"][^'"]+['"]/g, 'slate_800: "#121212"');
               fs.writeFileSync(full, tokens);
             }
-            if (file === 'themes.ts') {
-              let themes = fs.readFileSync(full, 'utf8');
-              themes += '\ntry { Object.assign(dim, dark); Object.assign(light, dark); } catch (e) {}\n';
-              fs.writeFileSync(full, themes);
-            }
           });
 
-          // F. Replace Butterfly & Logo with Fox Logo
-          walk('src', (full, file) => {
-            if (file === 'Butterfly.tsx' || file === 'Butterfly.js' || file === 'Logo.tsx' || file === 'Logo.js') {
-              const safeLogo = `
-                import React from "react";
-                import { Image } from "react-native";
-                const LOGO_URI = "${logoBase64}";
-                export function Butterfly({ width = 36, height, style }: any) {
-                  const size = width || 36;
-                  return (
-                    <Image
-                      source={{ uri: LOGO_URI }}
-                      style={[{ width: size, height: height || size, resizeMode: "contain" }, style]}
-                    />
-                  );
-                }
-                export const Logo = Butterfly;
-                export const Logotype = () => null;
-                export default Butterfly;
-              `;
-              fs.writeFileSync(full, safeLogo);
-            }
-            if (file === 'Logotype.tsx' || file === 'Logotype.js') {
-              fs.writeFileSync(full, 'import React from "react"; export function Logotype() { return null; } export default Logotype;');
-            }
-          });
-
-          // G. Content Feed Isolation (deducia.com handles only)
-          walk('src/state/queries', (full, file) => {
-            if (file === 'post-feed.ts' || file === 'post-feed.js') {
-              let code = fs.readFileSync(full, 'utf8');
-              if (!code.includes('isDeduciaHandle')) {
-                const helper = `
-                  function isDeduciaHandle(handle?: string): boolean {
-                    if (!handle) return false;
-                    return handle.endsWith(".deducia.com") || handle === "deducia.com";
-                  }
-                `;
-                code = helper + code;
-                code = code.replace(/res\.feed/g, 'res.feed.filter(item => isDeduciaHandle(item.post.author.handle))');
-                fs.writeFileSync(full, code);
-                console.log('Injected content isolation in:', full);
-              }
-            } else if (file === 'actor-search.ts' || file === 'actor-search.js') {
-              let code = fs.readFileSync(full, 'utf8');
-              if (!code.includes('isDeduciaHandle')) {
-                const helper = `
-                  function isDeduciaHandle(handle?: string): boolean {
-                    if (!handle) return false;
-                    return handle.endsWith(".deducia.com") || handle === "deducia.com";
-                  }
-                `;
-                code = helper + code;
-                code = code.replace(/res\.actors/g, 'res.actors.filter(actor => isDeduciaHandle(actor.handle))');
-                fs.writeFileSync(full, code);
-              }
-            } else if (file === 'suggested-follows.ts' || file === 'suggested-follows.js') {
-              let code = fs.readFileSync(full, 'utf8');
-              code = code.replace(/data\.suggestions/g, '[]');
-              fs.writeFileSync(full, code);
-            }
-          });
-
-          // H. Neutralize Custom Server Selector & Hosting Provider Popups
+          // E. Disable Custom Hosting Provider Dialog
           walk('src/screens', (full, file) => {
             if (file.includes('HostingProviderDialog') && /\.(tsx|jsx|ts|js)$/.test(file)) {
               fs.writeFileSync(full, 'import React from "react"; export function HostingProviderDialog() { return null; } export default HostingProviderDialog;');
-            } else if (file.includes('ServerSelector') && /\.(tsx|jsx|ts|js)$/.test(file)) {
-              fs.writeFileSync(full, 'import React from "react"; export function ServerSelector() { return null; } export function ServerSelectorBtn() { return null; } export default ServerSelector;');
-            } else if (full.includes('Signup') && /\.(tsx|jsx|ts|js)$/.test(file)) {
-              let content = fs.readFileSync(full, 'utf8');
-              if (content.includes('onPressSelectService')) {
-                content = content.replace(/onPressSelectService=\{[^}]+\}/g, 'onPressSelectService={() => {}}');
-                fs.writeFileSync(full, content);
-              }
             }
           });
 
-          // I. Profile Links & QR Codes point to social.deducia.com
+          // F. Profile & QR Links to social.deducia.com
           walk('src', (full, file) => {
             if (file === 'url-helpers.ts' || file === 'url-helpers.js') {
               let code = fs.readFileSync(full, 'utf8');
@@ -324,91 +298,7 @@ jobs:
             }
           });
 
-          // J. Mount Welcome Artwork cleanly in SplashScreen
-          walk('src', (full, file) => {
-            if (file === 'SplashScreen.tsx' && full.includes('auth')) {
-              const safeSplash = `
-                import React from "react";
-                import { ImageBackground, StyleSheet, View } from "react-native";
-                import { useSafeAreaInsets } from "react-native-safe-area-context";
-                import { Button } from "#/components/Button";
-
-                const WELCOME_URI = "${welcomeBase64}";
-
-                export function SplashScreen({
-                  onPressSignin,
-                  onPressCreateAccount,
-                }: {
-                  onPressSignin: () => void;
-                  onPressCreateAccount: () => void;
-                }) {
-                  const insets = useSafeAreaInsets();
-                  return (
-                    <View style={styles.container}>
-                      {WELCOME_URI ? (
-                        <ImageBackground
-                          source={{ uri: WELCOME_URI }}
-                          style={styles.background}
-                          resizeMode="cover">
-                          <View style={[styles.actionArea, { paddingBottom: Math.max(insets.bottom, 24) + 16 }]}>
-                            <Button
-                              label="Create account"
-                              size="large"
-                              variant="solid"
-                              color="primary"
-                              onPress={onPressCreateAccount}
-                              style={styles.createBtn}
-                            />
-                            <Button
-                              label="Sign in"
-                              size="large"
-                              variant="ghost"
-                              color="secondary"
-                              onPress={onPressSignin}
-                              style={styles.signInBtn}
-                            />
-                          </View>
-                        </ImageBackground>
-                      ) : (
-                        <View style={[styles.actionArea, { paddingBottom: Math.max(insets.bottom, 24) + 16, flex: 1, justifyContent: "flex-end" }]}>
-                          <Button
-                            label="Create account"
-                            size="large"
-                            variant="solid"
-                            color="primary"
-                            onPress={onPressCreateAccount}
-                            style={styles.createBtn}
-                          />
-                          <Button
-                            label="Sign in"
-                            size="large"
-                            variant="ghost"
-                            color="secondary"
-                            onPress={onPressSignin}
-                            style={styles.signInBtn}
-                          />
-                        </View>
-                      )}
-                    </View>
-                  );
-                }
-
-                const styles = StyleSheet.create({
-                  container: { flex: 1, backgroundColor: "#000000" },
-                  background: { flex: 1, justifyContent: "flex-end" },
-                  actionArea: { paddingHorizontal: 24, gap: 12, backgroundColor: "transparent" },
-                  createBtn: { borderRadius: 32, backgroundColor: "#ffffff" },
-                  signInBtn: { borderRadius: 32, borderColor: "#333333" },
-                });
-
-                export default SplashScreen;
-              `;
-              fs.writeFileSync(full, safeSplash);
-              console.log('Installed clean SplashScreen in:', full);
-            }
-          });
-
-          // K. Global Text Rebranding
+          // G. Global Text Rebranding
           walk('src', (full, file) => {
             if (/\.(ts|tsx|js|jsx|po|json)$/.test(file) && !file.endsWith('package.json')) {
               let content = fs.readFileSync(full, 'utf8');
@@ -430,15 +320,15 @@ jobs:
             }
           });
 
-          console.log('Deducia Unified Master Patches finished cleanly.');
+          console.log('Safe patches completed successfully.');
           EOF
-          node patch_master.js
-          rm patch_master.js
+          node patch_safe.js
+          rm patch_safe.js
 
-      - name: "11. Install Repository Dependencies"
+      - name: "12. Install Repository Dependencies"
         run: pnpm install --no-frozen-lockfile
 
-      - name: "12. Compile Lingui Localization Catalogs"
+      - name: "13. Compile Lingui Localization Catalogs"
         run: |
           pnpm run intl:build || pnpm run intl:compile || pnpm exec lingui compile || npx @lingui/cli compile || true
 
@@ -460,11 +350,19 @@ jobs:
             }
           '
 
-      - name: "13. Generate Native Android Project (Expo Clean Prebuild)"
+      - name: "14. Generate Native Android Project (Expo Clean Prebuild)"
         run: npx expo prebuild --platform android --clean
 
-      - name: "14. Overwrite Native Android Drawables & Bootsplash Icons"
+      - name: "15. Enforce Deducia App Name & Native Drawables"
         run: |
+          # 1. Enforce App Name in native strings.xml
+          STRINGS_FILE="android/app/src/main/res/values/strings.xml"
+          if [ -f "$STRINGS_FILE" ]; then
+            sed -i 's|<string name="app_name">.*</string>|<string name="app_name">Deducia</string>|g' "$STRINGS_FILE"
+            echo "Verified Deducia app_name in strings.xml"
+          fi
+
+          # 2. Force Fox Logo into all Android mipmaps and bootsplash drawables
           LOGO_SRC=""
           for candidate in ic_launcher.png IC_launcher.png ic.png IC.png logo.png LOGO.png deducia-logo.png; do
             if [ -f "$candidate" ]; then
@@ -478,18 +376,18 @@ jobs:
           fi
 
           if [ -n "$LOGO_SRC" ] && [ -f "$LOGO_SRC" ]; then
-            echo "Directly overriding native Android mipmaps and drawables with $LOGO_SRC..."
+            echo "Overwriting native Android drawables with $LOGO_SRC..."
             find android/app/src/main/res -type f \( -name "bootsplash_logo*.png" -o -name "ic_launcher*.png" \) -exec cp -f "$LOGO_SRC" "{}" \;
           fi
 
-      - name: "15. Compile Standalone Android Release APK"
+      - name: "16. Compile Standalone Android Release APK"
         run: |
           cd android
           chmod +x gradlew
           export GRADLE_OPTS="-Xmx4096m -Dfile.encoding=UTF-8"
           ./gradlew assembleRelease -x lint -x lintVitalRelease -PreactNativeArchitectures=arm64-v8a,armeabi-v7a --no-daemon
 
-      - name: "16. Locate Compiled Standalone APK"
+      - name: "17. Locate Compiled Standalone APK"
         id: find-apk
         run: |
           APK_FILE=$(find android/app/build/outputs/apk -type f -name "*.apk" ! -name "*unsigned*" | head -n 1)
@@ -499,18 +397,18 @@ jobs:
           echo "Found APK at: $APK_FILE"
           echo "apk_path=$APK_FILE" >> $GITHUB_OUTPUT
 
-      - name: "17. Upload Build Artifact"
+      - name: "18. Upload Build Artifact"
         uses: actions/upload-artifact@v4
         with:
           name: deducia-standalone-apk
           path: ${{ steps.find-apk.outputs.apk_path }}
 
-      - name: "18. Publish Official GitHub Release"
+      - name: "19. Publish Official GitHub Release"
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v1.0.0-${{ github.run_number }}
           name: "Deducia Social v1.0.0 (Build ${{ github.run_number }})"
-          body: "Official standalone release of Deducia. Backend locked to pds.deducia.com, content feed isolated to @*.deducia.com accounts, age assurance unlocked, and Fox bootsplash active."
+          body: "Official standalone release of Deducia. App name set to Deducia, bootsplash updated to black with Fox logo, PDS locked to pds.deducia.com, and outside profiles filtered."
           files: ${{ steps.find-apk.outputs.apk_path }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
