@@ -1,4 +1,4 @@
-name: Build and Release Android APK
+name: "Build and Release Android APK"
 
 on:
   workflow_dispatch:
@@ -16,36 +16,36 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: 1. Checkout Clean Repository
+      - name: "1. Checkout Clean Repository"
         uses: actions/checkout@v4
 
-      - name: 2. Setup Node.js 24 Environment
+      - name: "2. Setup Node.js 24 Environment"
         uses: actions/setup-node@v4
         with:
           node-version: '24'
 
-      - name: 3. Setup pnpm Package Manager
+      - name: "3. Setup pnpm Package Manager"
         run: |
           corepack enable
           corepack prepare pnpm@11.23.0 --activate || npm install -g pnpm@latest --force
 
-      - name: 4. Setup Java JDK 17
+      - name: "4. Setup Java JDK 17"
         uses: actions/setup-java@v4
         with:
           distribution: 'zulu'
           java-version: '17'
 
-      - name: 5. Accept Android SDK Licenses
+      - name: "5. Accept Android SDK Licenses"
         run: |
           yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses || true
 
-      - name: 6. Ensure Workspace Integrity
+      - name: "6. Ensure Workspace Integrity"
         run: |
           if [ -f "pnpm-workspace.yaml" ]; then
             grep -q "packages:" pnpm-workspace.yaml || echo -e "packages:\n  - '.'" >> pnpm-workspace.yaml
           fi
 
-      - name: 7. Purge Dev Client Package
+      - name: "7. Purge Dev Client Package"
         run: |
           node -e '
             const fs = require("fs");
@@ -58,20 +58,16 @@ jobs:
             }
           '
 
-      - name: 8. Stage Brand Assets (Icons, Welcome Artwork & Splash)
+      - name: "8. Stage Brand Assets (Icons, Welcome Artwork & Splash)"
         run: |
           mkdir -p assets
-          
-          # Stage deducia-welcome.png into assets folder
+
           if [ -f "deducia-welcome.png" ]; then
             cp -f deducia-welcome.png assets/deducia-welcome.png
-            echo "Successfully staged assets/deducia-welcome.png"
           elif [ -f "deduciawelcome.png" ]; then
             cp -f deduciawelcome.png assets/deducia-welcome.png
-            echo "Successfully staged assets/deducia-welcome.png from fallback"
           fi
 
-          # Locate Fox Logo
           LOGO_SRC=""
           for candidate in ic_launcher.png IC_launcher.png ic.png IC.png logo.png LOGO.png deducia-logo.png; do
             if [ -f "$candidate" ]; then
@@ -93,499 +89,318 @@ jobs:
             find assets -type f \( -name "*icon*.png" -o -name "*splash*.png" -o -name "*bootsplash*" \) -exec cp -f "$LOGO_SRC" "{}" \;
           fi
 
-      - name: 9. Patch: Core Network Endpoints & Link Sanitization
+      - name: "9. Apply Unified Deducia Master Patches"
         run: |
-          node -e '
-            const fs = require("fs");
-            const path = require("path");
+          cat << 'EOF' > patch_master.js
+          const fs = require('fs');
+          const path = require('path');
 
-            function walk(dir) {
-              if (!fs.existsSync(dir)) return;
-              fs.readdirSync(dir).forEach(file => {
-                const full = path.join(dir, file);
-                if (fs.statSync(full).isDirectory()) {
-                  if (!["node_modules", ".git", "android", "ios"].includes(file)) walk(full);
-                } else if (/constants\.(ts|js)$/.test(file)) {
-                  let content = fs.readFileSync(full, "utf8");
-                  
-                  // Enforce PDS lock for authentication and user storage
-                  content = content.replace(/BSKY_SERVICE\s*=\s*['"][^'"]+['"]/g, "BSKY_SERVICE = \"https://pds.deducia.com\"");
-                  content = content.replace(/DEFAULT_SERVICE\s*=\s*[^;\n]+/g, "DEFAULT_SERVICE = \"https://pds.deducia.com\"");
-                  content = content.replace(/BSKY_SERVICE_DID\s*=\s*['"][^'"]+['"]/g, "BSKY_SERVICE_DID = \"did:web:pds.deducia.com\"");
-                  
-                  // Route discovery queries to public AppView to prevent startup freezes
-                  content = content.replace(/PUBLIC_BSKY_SERVICE\s*=\s*['"][^'"]+['"]/g, "PUBLIC_BSKY_SERVICE = \"https://public.api.bsky.app\"");
-                  
-                  // Strip Zendesk, blueskyweb, and support subpaths
-                  content = content.replace(/HELP_DESK_URL\s*=\s*`[^`]+`/g, "HELP_DESK_URL = \"https://social.deducia.com\"");
-                  content = content.replace(/HELP_DESK_URL\s*=\s*['"][^'"]+['"]/g, "HELP_DESK_URL = \"https://social.deducia.com\"");
-                  content = content.replace(/BSKY_DOWNLOAD_URL\s*=\s*['"][^'"]+['"]/g, "BSKY_DOWNLOAD_URL = \"https://social.deducia.com\"");
-                  content = content.replace(/STATUS_PAGE_URL\s*=\s*['"][^'"]+['"]/g, "STATUS_PAGE_URL = \"https://social.deducia.com\"");
-                  
-                  // Overwrite webLinks object to prevent 404s
-                  content = content.replace(/webLinks\s*=\s*\{[^}]+\}/gs, "webLinks = { tos: \"https://social.deducia.com\", privacy: \"https://social.deducia.com\", community: \"https://social.deducia.com\", communityDeprecated: \"https://social.deducia.com\" }");
-                  
-                  fs.writeFileSync(full, content);
-                  console.log("Successfully patched constants in:", full);
-                }
-              });
+          function walk(dir, callback) {
+            if (!fs.existsSync(dir)) return;
+            fs.readdirSync(dir).forEach(file => {
+              const full = path.join(dir, file);
+              if (fs.statSync(full).isDirectory()) {
+                if (!['node_modules', '.git', 'android', 'ios'].includes(file)) walk(full, callback);
+              } else {
+                callback(full, file);
+              }
+            });
+          }
+
+          // A. Load Fox Logo as Base64 data URI
+          let logoBase64 = '';
+          for (const f of ['ic_launcher.png', 'deducia-logo.png', 'ic.png', 'logo.png']) {
+            if (fs.existsSync(f)) {
+              logoBase64 = 'data:image/png;base64,' + fs.readFileSync(f).toString('base64');
+              console.log('Loaded Fox logo Base64 from:', f);
+              break;
             }
-            walk("src");
-          '
+          }
 
-      - name: 10. Patch: Age Assurance Mock (Fix Red Error Banner & Unlock Chat)
-        run: |
-          node -e '
-            const fs = require("fs");
-            const path = require("path");
-
-            function walk(dir) {
-              if (!fs.existsSync(dir)) return;
-              fs.readdirSync(dir).forEach(file => {
-                const full = path.join(dir, file);
-                if (fs.statSync(full).isDirectory()) {
-                  if (!["node_modules", ".git"].includes(file)) walk(full);
-                } else if (full.includes("ageAssurance") && (file === "state.ts" || file === "state.tsx")) {
-                  const cleanMock = `
-                    import {useCallback} from "react";
-                    export function useAgeAssurance() {
-                      return {
-                        isEligible: true,
-                        isVerified: true,
-                        status: "ready" as const,
-                        lastInitiatedAt: null,
-                        canAccessChat: true,
-                        promptVerification: useCallback(() => {}, []),
-                      };
-                    }
-                    export function useAgeAssuranceState() {
-                      return {
-                        isEligible: true,
-                        isVerified: true,
-                        status: "ready" as const,
-                        lastInitiatedAt: null,
-                        canAccessChat: true,
-                      };
-                    }
-                    export function useIsAgeAssuranceRequired() {
-                      return false;
-                    }
-                  `;
-                  fs.writeFileSync(full, cleanMock);
-                  console.log("Bypassed Age Assurance check in:", full);
-                }
-              });
+          // B. Load Welcome Artwork as Base64 data URI
+          let welcomeBase64 = '';
+          for (const f of ['deducia-welcome.png', 'assets/deducia-welcome.png', 'deduciawelcome.png']) {
+            if (fs.existsSync(f)) {
+              welcomeBase64 = 'data:image/png;base64,' + fs.readFileSync(f).toString('base64');
+              console.log('Loaded welcome artwork Base64 from:', f);
+              break;
             }
-            walk("src");
-          '
+          }
 
-      - name: 11. Patch: OLED Pure Black Palette & Monochrome Buttons
-        run: |
-          node -e '
-            const fs = require("fs");
-            const path = require("path");
-
-            function walk(dir) {
-              if (!fs.existsSync(dir)) return;
-              fs.readdirSync(dir).forEach(file => {
-                const full = path.join(dir, file);
-                if (fs.statSync(full).isDirectory()) {
-                  if (!["node_modules", ".git"].includes(file)) walk(full);
-                } else if (file === "tokens.ts" && full.includes("alf")) {
-                  let tokens = fs.readFileSync(full, "utf8");
-                  tokens = tokens.replace(/blue_500:\s*['"][^'"]+['"]/g, "blue_500: \"#ffffff\"");
-                  tokens = tokens.replace(/blue_600:\s*['"][^'"]+['"]/g, "blue_600: \"#e5e5e5\"");
-                  tokens = tokens.replace(/blue_400:\s*['"][^'"]+['"]/g, "blue_400: \"#ffffff\"");
-                  tokens = tokens.replace(/slate_950:\s*['"][^'"]+['"]/g, "slate_950: \"#000000\"");
-                  tokens = tokens.replace(/slate_900:\s*['"][^'"]+['"]/g, "slate_900: \"#000000\"");
-                  tokens = tokens.replace(/slate_850:\s*['"][^'"]+['"]/g, "slate_850: \"#000000\"");
-                  tokens = tokens.replace(/slate_800:\s*['"][^'"]+['"]/g, "slate_800: \"#121212\"");
-                  fs.writeFileSync(full, tokens);
-                  console.log("Updated design tokens for OLED black in:", full);
-                } else if (file === "themes.ts" && full.includes("alf")) {
-                  let themes = fs.readFileSync(full, "utf8");
-                  themes += "\ntry { Object.assign(dim, dark); Object.assign(light, dark); } catch (e) {}\n";
-                  fs.writeFileSync(full, themes);
-                  console.log("Enforced dark theme override in:", full);
-                }
-              });
+          // C. Patch Constants (Lock PDS while keeping Public AppView alive to prevent boot freezes)
+          walk('src/lib', (full, file) => {
+            if (/constants\.(ts|js)$/.test(file)) {
+              let code = fs.readFileSync(full, 'utf8');
+              code = code.replace(/BSKY_SERVICE\s*=\s*['"][^'"]+['"]/g, 'BSKY_SERVICE = "https://pds.deducia.com"');
+              code = code.replace(/DEFAULT_SERVICE\s*=\s*[^;\n]+/g, 'DEFAULT_SERVICE = "https://pds.deducia.com"');
+              code = code.replace(/BSKY_SERVICE_DID\s*=\s*['"][^'"]+['"]/g, 'BSKY_SERVICE_DID = "did:web:pds.deducia.com"');
+              code = code.replace(/PUBLIC_BSKY_SERVICE\s*=\s*['"][^'"]+['"]/g, 'PUBLIC_BSKY_SERVICE = "https://public.api.bsky.app"');
+              code = code.replace(/HELP_DESK_URL\s*=\s*`[^`]+`/g, 'HELP_DESK_URL = "https://social.deducia.com"');
+              code = code.replace(/HELP_DESK_URL\s*=\s*['"][^'"]+['"]/g, 'HELP_DESK_URL = "https://social.deducia.com"');
+              code = code.replace(/BSKY_DOWNLOAD_URL\s*=\s*['"][^'"]+['"]/g, 'BSKY_DOWNLOAD_URL = "https://social.deducia.com"');
+              code = code.replace(/STATUS_PAGE_URL\s*=\s*['"][^'"]+['"]/g, 'STATUS_PAGE_URL = "https://social.deducia.com"');
+              code = code.replace(/webLinks\s*=\s*\{[^}]+\}/gs, 'webLinks = { tos: "https://social.deducia.com", privacy: "https://social.deducia.com", community: "https://social.deducia.com", communityDeprecated: "https://social.deducia.com" }');
+              fs.writeFileSync(full, code);
+              console.log('Patched constants.ts successfully.');
             }
-            walk("src");
-          '
+          });
 
-      - name: 12. Patch: Vector Components & Fox Logo Base64 Injection
-        run: |
-          node -e '
-            const fs = require("fs");
-            const path = require("path");
+          // D. Bypass Age Assurance Checks
+          walk('src', (full, file) => {
+            if (full.includes('ageAssurance') && (file === 'state.ts' || file === 'state.tsx')) {
+              const cleanMock = `
+                import {useCallback} from "react";
+                export function useAgeAssurance() {
+                  return {
+                    isEligible: true,
+                    isVerified: true,
+                    status: "ready" as const,
+                    lastInitiatedAt: null,
+                    canAccessChat: true,
+                    promptVerification: useCallback(() => {}, []),
+                  };
+                }
+                export function useAgeAssuranceState() {
+                  return {
+                    isEligible: true,
+                    isVerified: true,
+                    status: "ready" as const,
+                    lastInitiatedAt: null,
+                    canAccessChat: true,
+                  };
+                }
+                export function useIsAgeAssuranceRequired() {
+                  return false;
+                }
+              `;
+              fs.writeFileSync(full, cleanMock);
+              console.log('Bypassed Age Assurance in:', full);
+            }
+          });
 
-            let logoBase64 = "";
-            for (const f of ["ic_launcher.png", "deducia-logo.png", "ic.png"]) {
-              if (fs.existsSync(f)) {
-                logoBase64 = "data:image/png;base64," + fs.readFileSync(f).toString("base64");
-                console.log("Loaded logo Base64 data URI from:", f);
-                break;
+          // E. Solid OLED Black Palette & Monochrome Buttons
+          walk('src/alf', (full, file) => {
+            if (file === 'tokens.ts') {
+              let tokens = fs.readFileSync(full, 'utf8');
+              tokens = tokens.replace(/blue_500:\s*['"][^'"]+['"]/g, 'blue_500: "#ffffff"');
+              tokens = tokens.replace(/blue_600:\s*['"][^'"]+['"]/g, 'blue_600: "#e5e5e5"');
+              tokens = tokens.replace(/blue_400:\s*['"][^'"]+['"]/g, 'blue_400: "#ffffff"');
+              tokens = tokens.replace(/slate_950:\s*['"][^'"]+['"]/g, 'slate_950: "#000000"');
+              tokens = tokens.replace(/slate_900:\s*['"][^'"]+['"]/g, 'slate_900: "#000000"');
+              tokens = tokens.replace(/slate_850:\s*['"][^'"]+['"]/g, 'slate_850: "#000000"');
+              tokens = tokens.replace(/slate_800:\s*['"][^'"]+['"]/g, 'slate_800: "#121212"');
+              fs.writeFileSync(full, tokens);
+            }
+            if (file === 'themes.ts') {
+              let themes = fs.readFileSync(full, 'utf8');
+              themes += '\ntry { Object.assign(dim, dark); Object.assign(light, dark); } catch (e) {}\n';
+              fs.writeFileSync(full, themes);
+            }
+          });
+
+          // F. Replace Butterfly & Logo with Fox Logo
+          walk('src', (full, file) => {
+            if (file === 'Butterfly.tsx' || file === 'Butterfly.js' || file === 'Logo.tsx' || file === 'Logo.js') {
+              const safeLogo = `
+                import React from "react";
+                import { Image } from "react-native";
+                const LOGO_URI = "${logoBase64}";
+                export function Butterfly({ width = 36, height, style }: any) {
+                  const size = width || 36;
+                  return (
+                    <Image
+                      source={{ uri: LOGO_URI }}
+                      style={[{ width: size, height: height || size, resizeMode: "contain" }, style]}
+                    />
+                  );
+                }
+                export const Logo = Butterfly;
+                export const Logotype = () => null;
+                export default Butterfly;
+              `;
+              fs.writeFileSync(full, safeLogo);
+            }
+            if (file === 'Logotype.tsx' || file === 'Logotype.js') {
+              fs.writeFileSync(full, 'import React from "react"; export function Logotype() { return null; } export default Logotype;');
+            }
+          });
+
+          // G. Content Feed Isolation (deducia.com handles only)
+          walk('src/state/queries', (full, file) => {
+            if (file === 'post-feed.ts' || file === 'post-feed.js') {
+              let code = fs.readFileSync(full, 'utf8');
+              if (!code.includes('isDeduciaHandle')) {
+                const helper = `
+                  function isDeduciaHandle(handle?: string): boolean {
+                    if (!handle) return false;
+                    return handle.endsWith(".deducia.com") || handle === "deducia.com";
+                  }
+                `;
+                code = helper + code;
+                code = code.replace(/res\.feed/g, 'res.feed.filter(item => isDeduciaHandle(item.post.author.handle))');
+                fs.writeFileSync(full, code);
+                console.log('Injected content isolation in:', full);
+              }
+            } else if (file === 'actor-search.ts' || file === 'actor-search.js') {
+              let code = fs.readFileSync(full, 'utf8');
+              if (!code.includes('isDeduciaHandle')) {
+                const helper = `
+                  function isDeduciaHandle(handle?: string): boolean {
+                    if (!handle) return false;
+                    return handle.endsWith(".deducia.com") || handle === "deducia.com";
+                  }
+                `;
+                code = helper + code;
+                code = code.replace(/res\.actors/g, 'res.actors.filter(actor => isDeduciaHandle(actor.handle))');
+                fs.writeFileSync(full, code);
+              }
+            } else if (file === 'suggested-follows.ts' || file === 'suggested-follows.js') {
+              let code = fs.readFileSync(full, 'utf8');
+              code = code.replace(/data\.suggestions/g, '[]');
+              fs.writeFileSync(full, code);
+            }
+          });
+
+          // H. Neutralize Custom Server Selector & Hosting Provider Popups
+          walk('src/screens', (full, file) => {
+            if (file.includes('HostingProviderDialog') && /\.(tsx|jsx|ts|js)$/.test(file)) {
+              fs.writeFileSync(full, 'import React from "react"; export function HostingProviderDialog() { return null; } export default HostingProviderDialog;');
+            } else if (file.includes('ServerSelector') && /\.(tsx|jsx|ts|js)$/.test(file)) {
+              fs.writeFileSync(full, 'import React from "react"; export function ServerSelector() { return null; } export function ServerSelectorBtn() { return null; } export default ServerSelector;');
+            } else if (full.includes('Signup') && /\.(tsx|jsx|ts|js)$/.test(file)) {
+              let content = fs.readFileSync(full, 'utf8');
+              if (content.includes('onPressSelectService')) {
+                content = content.replace(/onPressSelectService=\{[^}]+\}/g, 'onPressSelectService={() => {}}');
+                fs.writeFileSync(full, content);
               }
             }
+          });
 
-            function walk(dir) {
-              if (!fs.existsSync(dir)) return;
-              fs.readdirSync(dir).forEach(file => {
-                const full = path.join(dir, file);
-                if (fs.statSync(full).isDirectory()) {
-                  if (!["node_modules", ".git"].includes(file)) walk(full);
-                } else if (file === "Butterfly.tsx" || file === "Butterfly.js") {
-                  const safeButterfly = `
-                    import React from "react";
-                    import { Image } from "react-native";
-                    const LOGO_URI = "${logoBase64}";
-                    export function Butterfly({ width = 36, height, style }: any) {
-                      const size = width || 36;
-                      return (
-                        <Image
-                          source={{ uri: LOGO_URI }}
-                          style={[{ width: size, height: height || size, resizeMode: "contain" }, style]}
-                        />
-                      );
-                    }
-                    export const Logo = Butterfly;
-                    export const Logotype = () => null;
-                    export default Butterfly;
-                  `;
-                  fs.writeFileSync(full, safeButterfly);
-                  console.log("Replaced Butterfly component with Fox logo in:", full);
-                } else if (file === "Logo.tsx" || file === "Logo.js") {
-                  const safeLogo = `
-                    import React from "react";
-                    import { Image } from "react-native";
-                    const LOGO_URI = "${logoBase64}";
-                    export function Logo({ width = 28, height, style }: any) {
-                      const size = width || 28;
-                      return (
-                        <Image
-                          source={{ uri: LOGO_URI }}
-                          style={[{ width: size, height: height || size, resizeMode: "contain" }, style]}
-                        />
-                      );
-                    }
-                    export const Logotype = () => null;
-                    export const Butterfly = Logo;
-                    export default Logo;
-                  `;
-                  fs.writeFileSync(full, safeLogo);
-                  console.log("Replaced Logo component in:", full);
-                } else if (file === "Logotype.tsx" || file === "Logotype.js") {
-                  fs.writeFileSync(full, "import React from \"react\"; export function Logotype() { return null; } export default Logotype;");
-                }
-              });
+          // I. Profile Links & QR Codes point to social.deducia.com
+          walk('src', (full, file) => {
+            if (file === 'url-helpers.ts' || file === 'url-helpers.js') {
+              let code = fs.readFileSync(full, 'utf8');
+              code = code.replace(/BSKY_APP_HOST\s*=\s*['"][^'"]+['"]/g, 'BSKY_APP_HOST = "https://social.deducia.com"');
+              code = code.replace(/https:\/\/bsky\.app/g, 'https://social.deducia.com');
+              fs.writeFileSync(full, code);
             }
-            walk("src");
-          '
+          });
 
-      - name: 13. Patch: Content Wall & Walled Garden Isolation (post-feed.ts)
-        run: |
-          node -e '
-            const fs = require("fs");
-            const path = require("path");
+          // J. Mount Welcome Artwork cleanly in SplashScreen
+          walk('src', (full, file) => {
+            if (file === 'SplashScreen.tsx' && full.includes('auth')) {
+              const safeSplash = `
+                import React from "react";
+                import { ImageBackground, StyleSheet, View } from "react-native";
+                import { useSafeAreaInsets } from "react-native-safe-area-context";
+                import { Button } from "#/components/Button";
 
-            function walk(dir) {
-              if (!fs.existsSync(dir)) return;
-              fs.readdirSync(dir).forEach(file => {
-                const full = path.join(dir, file);
-                if (fs.statSync(full).isDirectory()) {
-                  if (!["node_modules", ".git"].includes(file)) walk(full);
-                } else if (file === "post-feed.ts" || file === "post-feed.js") {
-                  let code = fs.readFileSync(full, "utf8");
-                  if (!code.includes("isDeduciaHandle")) {
-                    const helper = `
-                      function isDeduciaHandle(handle?: string): boolean {
-                        if (!handle) return false;
-                        return handle.endsWith(".deducia.com") || handle === "deducia.com";
-                      }
-                    `;
-                    code = helper + code;
-                    code = code.replace(/res\.feed/g, "res.feed.filter(item => isDeduciaHandle(item.post.author.handle))");
-                    fs.writeFileSync(full, code);
-                    console.log("Injected Deducia-only content isolation filter into:", full);
-                  }
-                }
-              });
-            }
-            walk("src");
-          '
+                const WELCOME_URI = "${welcomeBase64}";
 
-      - name: 14. Patch: User Search Filter & Clear Suggested Follows
-        run: |
-          node -e '
-            const fs = require("fs");
-            const path = require("path");
-
-            function walk(dir) {
-              if (!fs.existsSync(dir)) return;
-              fs.readdirSync(dir).forEach(file => {
-                const full = path.join(dir, file);
-                if (fs.statSync(full).isDirectory()) {
-                  if (!["node_modules", ".git"].includes(file)) walk(full);
-                } else if (file === "actor-search.ts" || file === "actor-search.js") {
-                  let code = fs.readFileSync(full, "utf8");
-                  if (!code.includes("isDeduciaHandle")) {
-                    const helper = `
-                      function isDeduciaHandle(handle?: string): boolean {
-                        if (!handle) return false;
-                        return handle.endsWith(".deducia.com") || handle === "deducia.com";
-                      }
-                    `;
-                    code = helper + code;
-                    code = code.replace(/res\.actors/g, "res.actors.filter(actor => isDeduciaHandle(actor.handle))");
-                    fs.writeFileSync(full, code);
-                    console.log("Restricted actor search to deducia.com handles in:", full);
-                  }
-                } else if (file === "suggested-follows.ts" || file === "suggested-follows.js") {
-                  let code = fs.readFileSync(full, "utf8");
-                  code = code.replace(/data\.suggestions/g, "[]");
-                  fs.writeFileSync(full, code);
-                  console.log("Purged suggested follows of third-party accounts in:", full);
-                }
-              });
-            }
-            walk("src");
-          '
-
-      - name: 15. Patch: Disable Custom Server Selector & Lock Hosting Provider
-        run: |
-          node -e '
-            const fs = require("fs");
-            const path = require("path");
-
-            function walk(dir) {
-              if (!fs.existsSync(dir)) return;
-              fs.readdirSync(dir).forEach(file => {
-                const full = path.join(dir, file);
-                if (fs.statSync(full).isDirectory()) {
-                  if (!["node_modules", ".git"].includes(file)) walk(full);
-                } else if (file.includes("HostingProviderDialog") && /\.(tsx|jsx|ts|js)$/.test(file)) {
-                  fs.writeFileSync(full, "import React from \"react\"; export function HostingProviderDialog() { return null; } export default HostingProviderDialog;");
-                  console.log("Disabled HostingProviderDialog in:", full);
-                } else if (file.includes("ServerSelector") && /\.(tsx|jsx|ts|js)$/.test(file)) {
-                  fs.writeFileSync(full, "import React from \"react\"; export function ServerSelector() { return null; } export function ServerSelectorBtn() { return null; } export default ServerSelector;");
-                  console.log("Disabled ServerSelector in:", full);
-                } else if (full.includes("Signup") && /\.(tsx|jsx|ts|js)$/.test(file)) {
-                  let content = fs.readFileSync(full, "utf8");
-                  if (content.includes("onPressSelectService")) {
-                    content = content.replace(/onPressSelectService=\{[^}]+\}/g, "onPressSelectService={() => {}}");
-                    fs.writeFileSync(full, content);
-                    console.log("Neutralized onPressSelectService in:", full);
-                  }
-                }
-              });
-            }
-            walk("src");
-          '
-
-      - name: 16. Patch: Profile Links & QR Code Domain Rewriting
-        run: |
-          node -e '
-            const fs = require("fs");
-            const path = require("path");
-
-            function walk(dir) {
-              if (!fs.existsSync(dir)) return;
-              fs.readdirSync(dir).forEach(file => {
-                const full = path.join(dir, file);
-                if (fs.statSync(full).isDirectory()) {
-                  if (!["node_modules", ".git"].includes(file)) walk(full);
-                } else if (file === "url-helpers.ts" || file === "url-helpers.js") {
-                  let code = fs.readFileSync(full, "utf8");
-                  code = code.replace(/BSKY_APP_HOST\s*=\s*['"][^'"]+['"]/g, "BSKY_APP_HOST = \"https://social.deducia.com\"");
-                  code = code.replace(/https:\/\/bsky\.app/g, "https://social.deducia.com");
-                  fs.writeFileSync(full, code);
-                  console.log("Sanitized profile and QR share URLs in:", full);
-                }
-              });
-            }
-            walk("src");
-          '
-
-      - name: 17. Patch: Welcome Splash Screen (Crash-Proof Asset Mount)
-        run: |
-          node -e '
-            const fs = require("fs");
-            const path = require("path");
-
-            let welcomeBase64 = "";
-            for (const f of ["deducia-welcome.png", "assets/deducia-welcome.png", "deduciawelcome.png"]) {
-              if (fs.existsSync(f)) {
-                welcomeBase64 = "data:image/png;base64," + fs.readFileSync(f).toString("base64");
-                console.log("Loaded welcome artwork Base64 from:", f);
-                break;
-              }
-            }
-
-            function walk(dir) {
-              if (!fs.existsSync(dir)) return;
-              fs.readdirSync(dir).forEach(file => {
-                const full = path.join(dir, file);
-                if (fs.statSync(full).isDirectory()) {
-                  if (!["node_modules", ".git"].includes(file)) walk(full);
-                } else if (file === "SplashScreen.tsx" && full.includes("auth")) {
-                  const crashProofSplash = `
-                    import React from "react";
-                    import { ImageBackground, StyleSheet, View } from "react-native";
-                    import { useSafeAreaInsets } from "react-native-safe-area-context";
-                    import { Button } from "#/components/Button";
-
-                    const WELCOME_URI = "${welcomeBase64}";
-
-                    export function SplashScreen({
-                      onPressSignin,
-                      onPressCreateAccount,
-                    }: {
-                      onPressSignin: () => void;
-                      onPressCreateAccount: () => void;
-                    }) {
-                      const insets = useSafeAreaInsets();
-                      return (
-                        <View style={styles.container}>
-                          {WELCOME_URI ? (
-                            <ImageBackground
-                              source={{ uri: WELCOME_URI }}
-                              style={styles.background}
-                              resizeMode="cover">
-                              <View style={[styles.actionArea, { paddingBottom: Math.max(insets.bottom, 24) + 16 }]}>
-                                <Button
-                                  label="Create account"
-                                  size="large"
-                                  variant="solid"
-                                  color="primary"
-                                  onPress={onPressCreateAccount}
-                                  style={styles.createBtn}
-                                />
-                                <Button
-                                  label="Sign in"
-                                  size="large"
-                                  variant="ghost"
-                                  color="secondary"
-                                  onPress={onPressSignin}
-                                  style={styles.signInBtn}
-                                />
-                              </View>
-                            </ImageBackground>
-                          ) : (
-                            <View style={[styles.actionArea, { paddingBottom: Math.max(insets.bottom, 24) + 16, flex: 1, justifyContent: "flex-end" }]}>
-                              <Button
-                                label="Create account"
-                                size="large"
-                                variant="solid"
-                                color="primary"
-                                onPress={onPressCreateAccount}
-                                style={styles.createBtn}
-                              />
-                              <Button
-                                label="Sign in"
-                                size="large"
-                                variant="ghost"
-                                color="secondary"
-                                onPress={onPressSignin}
-                                style={styles.signInBtn}
-                              />
-                            </View>
-                          )}
+                export function SplashScreen({
+                  onPressSignin,
+                  onPressCreateAccount,
+                }: {
+                  onPressSignin: () => void;
+                  onPressCreateAccount: () => void;
+                }) {
+                  const insets = useSafeAreaInsets();
+                  return (
+                    <View style={styles.container}>
+                      {WELCOME_URI ? (
+                        <ImageBackground
+                          source={{ uri: WELCOME_URI }}
+                          style={styles.background}
+                          resizeMode="cover">
+                          <View style={[styles.actionArea, { paddingBottom: Math.max(insets.bottom, 24) + 16 }]}>
+                            <Button
+                              label="Create account"
+                              size="large"
+                              variant="solid"
+                              color="primary"
+                              onPress={onPressCreateAccount}
+                              style={styles.createBtn}
+                            />
+                            <Button
+                              label="Sign in"
+                              size="large"
+                              variant="ghost"
+                              color="secondary"
+                              onPress={onPressSignin}
+                              style={styles.signInBtn}
+                            />
+                          </View>
+                        </ImageBackground>
+                      ) : (
+                        <View style={[styles.actionArea, { paddingBottom: Math.max(insets.bottom, 24) + 16, flex: 1, justifyContent: "flex-end" }]}>
+                          <Button
+                            label="Create account"
+                            size="large"
+                            variant="solid"
+                            color="primary"
+                            onPress={onPressCreateAccount}
+                            style={styles.createBtn}
+                          />
+                          <Button
+                            label="Sign in"
+                            size="large"
+                            variant="ghost"
+                            color="secondary"
+                            onPress={onPressSignin}
+                            style={styles.signInBtn}
+                          />
                         </View>
-                      );
-                    }
-
-                    const styles = StyleSheet.create({
-                      container: { flex: 1, backgroundColor: "#000000" },
-                      background: { flex: 1, justifyContent: "flex-end" },
-                      actionArea: { paddingHorizontal: 24, gap: 12, backgroundColor: "transparent" },
-                      createBtn: { borderRadius: 32, backgroundColor: "#ffffff" },
-                      signInBtn: { borderRadius: 32, borderColor: "#333333" },
-                    });
-
-                    export default SplashScreen;
-                  `;
-                  fs.writeFileSync(full, crashProofSplash);
-                  console.log("Installed crash-proof SplashScreen in:", full);
+                      )}
+                    </View>
+                  );
                 }
-              });
+
+                const styles = StyleSheet.create({
+                  container: { flex: 1, backgroundColor: "#000000" },
+                  background: { flex: 1, justifyContent: "flex-end" },
+                  actionArea: { paddingHorizontal: 24, gap: 12, backgroundColor: "transparent" },
+                  createBtn: { borderRadius: 32, backgroundColor: "#ffffff" },
+                  signInBtn: { borderRadius: 32, borderColor: "#333333" },
+                });
+
+                export default SplashScreen;
+              `;
+              fs.writeFileSync(full, safeSplash);
+              console.log('Installed clean SplashScreen in:', full);
             }
-            walk("src");
-          '
+          });
 
-      - name: 18. Patch: Rebrand Onboarding Value Proposition
-        run: |
-          node -e '
-            const fs = require("fs");
-            const path = require("path");
+          // K. Global Text Rebranding
+          walk('src', (full, file) => {
+            if (/\.(ts|tsx|js|jsx|po|json)$/.test(file) && !file.endsWith('package.json')) {
+              let content = fs.readFileSync(full, 'utf8');
+              let changed = false;
 
-            function walk(dir) {
-              if (!fs.existsSync(dir)) return;
-              fs.readdirSync(dir).forEach(file => {
-                const full = path.join(dir, file);
-                if (fs.statSync(full).isDirectory()) {
-                  if (!["node_modules", ".git"].includes(file)) walk(full);
-                } else if (file === "ValuePropositionPager.tsx" && full.includes("StepFinished")) {
-                  let code = fs.readFileSync(full, "utf8");
-                  code = code.replace(/Bluesky respects your time and attention/g, "Deducia respects your time and attention");
-                  code = code.replace(/Bluesky/g, "Deducia");
-                  fs.writeFileSync(full, code);
-                  console.log("Rebranded ValuePropositionPager copy in:", full);
-                }
-              });
+              if (content.includes('Bluesky Social')) { content = content.replace(/Bluesky Social/g, 'Deducia Social'); changed = true; }
+              if (content.includes('New to Bluesky?')) { content = content.replace(/New to Bluesky\?/g, 'New to Deducia?'); changed = true; }
+              if (content.includes('on Bluesky')) { content = content.replace(/on Bluesky/g, 'on Deducia'); changed = true; }
+              if (content.includes('the whole Bluesky thing')) { content = content.replace(/the whole Bluesky thing/g, 'the whole Deducia thing'); changed = true; }
+              if (content.includes('Bluesky respects your time')) { content = content.replace(/Bluesky respects your time/g, 'Deducia respects your time'); changed = true; }
+
+              const zendesk = /https?:\/\/(?:[a-zA-Z0-9.-]+\.)?zendesk\.com[^\s"'`)]*/gi;
+              if (zendesk.test(content)) {
+                content = content.replace(zendesk, 'https://social.deducia.com');
+                changed = true;
+              }
+
+              if (changed) fs.writeFileSync(full, content);
             }
-            walk("src");
-          '
+          });
 
-      - name: 19. Patch: Global Text Rebranding & URL Sanitization
-        run: |
-          node -e '
-            const fs = require("fs");
-            const path = require("path");
+          console.log('Deducia Unified Master Patches finished cleanly.');
+          EOF
+          node patch_master.js
+          rm patch_master.js
 
-            function walk(dir) {
-              if (!fs.existsSync(dir)) return;
-              fs.readdirSync(dir).forEach(file => {
-                const full = path.join(dir, file);
-                if (fs.statSync(full).isDirectory()) {
-                  if (!["node_modules", ".git"].includes(file)) walk(full);
-                } else if (/\.(ts|tsx|js|jsx|po|json)$/.test(file) && !file.endsWith("package.json")) {
-                  let content = fs.readFileSync(full, "utf8");
-                  let changed = false;
-
-                  if (content.includes("Bluesky Social")) {
-                    content = content.replace(/Bluesky Social/g, "Deducia Social");
-                    changed = true;
-                  }
-                  if (content.includes("New to Bluesky?")) {
-                    content = content.replace(/New to Bluesky\?/g, "New to Deducia?");
-                    changed = true;
-                  }
-                  if (content.includes("on Bluesky")) {
-                    content = content.replace(/on Bluesky/g, "on Deducia");
-                    changed = true;
-                  }
-                  if (content.includes("the whole Bluesky thing")) {
-                    content = content.replace(/the whole Bluesky thing/g, "the whole Deducia thing");
-                    changed = true;
-                  }
-
-                  const badUrlRegex = /https?:\/\/(?:[a-zA-Z0-9.-]+\.)?(?:zendesk\.com|blueskyweb\.xyz|bsky\.app\/about|bsky\.social\/about)[^\s"'`)]*/gi;
-                  if (badUrlRegex.test(content)) {
-                    content = content.replace(badUrlRegex, "https://social.deducia.com");
-                    changed = true;
-                  }
-
-                  if (changed) fs.writeFileSync(full, content);
-                }
-              });
-            }
-            walk("src");
-          '
-
-      - name: 20. Install Repository Dependencies
+      - name: "10. Install Repository Dependencies"
         run: pnpm install --no-frozen-lockfile
 
-      - name: 21. Compile Lingui Localization Catalogs
+      - name: "11. Compile Lingui Localization Catalogs"
         run: |
           pnpm run intl:build || pnpm run intl:compile || pnpm exec lingui compile || npx @lingui/cli compile || true
 
@@ -607,10 +422,10 @@ jobs:
             }
           '
 
-      - name: 22. Generate Native Android Project (Expo Clean Prebuild)
+      - name: "12. Generate Native Android Project (Expo Clean Prebuild)"
         run: npx expo prebuild --platform android --clean
 
-      - name: 23. Overwrite Native Android Drawables & Bootsplash Icons
+      - name: "13. Overwrite Native Android Drawables & Bootsplash Icons"
         run: |
           LOGO_SRC=""
           for candidate in ic_launcher.png IC_launcher.png ic.png IC.png logo.png LOGO.png deducia-logo.png; do
@@ -629,14 +444,14 @@ jobs:
             find android/app/src/main/res -type f \( -name "bootsplash_logo*.png" -o -name "ic_launcher*.png" \) -exec cp -f "$LOGO_SRC" "{}" \;
           fi
 
-      - name: 24. Compile Standalone Android Release APK
+      - name: "14. Compile Standalone Android Release APK"
         run: |
           cd android
           chmod +x gradlew
           export GRADLE_OPTS="-Xmx4096m -Dfile.encoding=UTF-8"
           ./gradlew assembleRelease -x lint -x lintVitalRelease -PreactNativeArchitectures=arm64-v8a,armeabi-v7a --no-daemon
 
-      - name: 25. Locate Compiled Standalone APK
+      - name: "15. Locate Compiled Standalone APK"
         id: find-apk
         run: |
           APK_FILE=$(find android/app/build/outputs/apk -type f -name "*.apk" ! -name "*unsigned*" | head -n 1)
@@ -646,13 +461,13 @@ jobs:
           echo "Found APK at: $APK_FILE"
           echo "apk_path=$APK_FILE" >> $GITHUB_OUTPUT
 
-      - name: 26. Upload Build Artifact
+      - name: "16. Upload Build Artifact"
         uses: actions/upload-artifact@v4
         with:
           name: deducia-standalone-apk
           path: ${{ steps.find-apk.outputs.apk_path }}
 
-      - name: 27. Publish Official GitHub Release
+      - name: "17. Publish Official GitHub Release"
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v1.0.0-${{ github.run_number }}
