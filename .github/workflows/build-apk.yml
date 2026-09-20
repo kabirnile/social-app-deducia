@@ -2,6 +2,11 @@ name: Build and Release Android APK
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/build-apk.yml'
 
 permissions:
   contents: write
@@ -108,7 +113,7 @@ jobs:
                   content = content.replace(/DEFAULT_SERVICE\s*=\s*[^;\n]+/g, "DEFAULT_SERVICE = \"https://pds.deducia.com\"");
                   content = content.replace(/BSKY_SERVICE_DID\s*=\s*['"][^'"]+['"]/g, "BSKY_SERVICE_DID = \"did:web:pds.deducia.com\"");
                   
-                  // Keep PUBLIC_BSKY_SERVICE pointed to public AppView to prevent boot freezes
+                  // Route discovery queries to public AppView to prevent startup freezes
                   content = content.replace(/PUBLIC_BSKY_SERVICE\s*=\s*['"][^'"]+['"]/g, "PUBLIC_BSKY_SERVICE = \"https://public.api.bsky.app\"");
                   
                   // Strip Zendesk, blueskyweb, and support subpaths
@@ -200,7 +205,7 @@ jobs:
                 } else if (file === "themes.ts" && full.includes("alf")) {
                   let themes = fs.readFileSync(full, "utf8");
                   themes += "\ntry { Object.assign(dim, dark); Object.assign(light, dark); } catch (e) {}\n";
-                  fs.writeFileSync(themes, themes);
+                  fs.writeFileSync(full, themes);
                   console.log("Enforced dark theme override in:", full);
                 }
               });
@@ -299,7 +304,6 @@ jobs:
                       }
                     `;
                     code = helper + code;
-                    // Filter raw feed responses
                     code = code.replace(/res\.feed/g, "res.feed.filter(item => isDeduciaHandle(item.post.author.handle))");
                     fs.writeFileSync(full, code);
                     console.log("Injected Deducia-only content isolation filter into:", full);
@@ -338,7 +342,6 @@ jobs:
                   }
                 } else if (file === "suggested-follows.ts" || file === "suggested-follows.js") {
                   let code = fs.readFileSync(full, "utf8");
-                  // Clear suggested follows so no bsky accounts appear during onboarding
                   code = code.replace(/data\.suggestions/g, "[]");
                   fs.writeFileSync(full, code);
                   console.log("Purged suggested follows of third-party accounts in:", full);
@@ -393,7 +396,6 @@ jobs:
                   if (!["node_modules", ".git"].includes(file)) walk(full);
                 } else if (file === "url-helpers.ts" || file === "url-helpers.js") {
                   let code = fs.readFileSync(full, "utf8");
-                  // Rewrite BSKY_APP_HOST so profile links and QR codes point to social.deducia.com
                   code = code.replace(/BSKY_APP_HOST\s*=\s*['"][^'"]+['"]/g, "BSKY_APP_HOST = \"https://social.deducia.com\"");
                   code = code.replace(/https:\/\/bsky\.app/g, "https://social.deducia.com");
                   fs.writeFileSync(full, code);
@@ -444,11 +446,32 @@ jobs:
                       const insets = useSafeAreaInsets();
                       return (
                         <View style={styles.container}>
-                          <ImageBackground
-                            source={{ uri: WELCOME_URI }}
-                            style={styles.background}
-                            resizeMode="cover">
-                            <View style={[styles.actionArea, { paddingBottom: Math.max(insets.bottom, 24) + 16 }]}>
+                          {WELCOME_URI ? (
+                            <ImageBackground
+                              source={{ uri: WELCOME_URI }}
+                              style={styles.background}
+                              resizeMode="cover">
+                              <View style={[styles.actionArea, { paddingBottom: Math.max(insets.bottom, 24) + 16 }]}>
+                                <Button
+                                  label="Create account"
+                                  size="large"
+                                  variant="solid"
+                                  color="primary"
+                                  onPress={onPressCreateAccount}
+                                  style={styles.createBtn}
+                                />
+                                <Button
+                                  label="Sign in"
+                                  size="large"
+                                  variant="ghost"
+                                  color="secondary"
+                                  onPress={onPressSignin}
+                                  style={styles.signInBtn}
+                                />
+                              </View>
+                            </ImageBackground>
+                          ) : (
+                            <View style={[styles.actionArea, { paddingBottom: Math.max(insets.bottom, 24) + 16, flex: 1, justifyContent: "flex-end" }]}>
                               <Button
                                 label="Create account"
                                 size="large"
@@ -466,7 +489,7 @@ jobs:
                                 style={styles.signInBtn}
                               />
                             </View>
-                          </ImageBackground>
+                          )}
                         </View>
                       );
                     }
@@ -546,7 +569,6 @@ jobs:
                     changed = true;
                   }
 
-                  // Eliminate lingering Zendesk or Bluesky support URLs
                   const badUrlRegex = /https?:\/\/(?:[a-zA-Z0-9.-]+\.)?(?:zendesk\.com|blueskyweb\.xyz|bsky\.app\/about|bsky\.social\/about)[^\s"'`)]*/gi;
                   if (badUrlRegex.test(content)) {
                     content = content.replace(badUrlRegex, "https://social.deducia.com");
