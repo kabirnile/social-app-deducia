@@ -89,7 +89,45 @@ jobs:
             find assets -type f \( -name "*icon*.png" -o -name "*splash*.png" -o -name "*bootsplash*" \) -exec cp -f "$LOGO_SRC" "{}" \;
           fi
 
-      - name: "9. Apply Unified Deducia Master Patches"
+      - name: "9. Generate Standalone Google Services Configuration"
+        run: |
+          node -e '
+            const fs = require("fs");
+            let pkgName = "xyz.blueskyweb.app";
+            try {
+              if (fs.existsSync("app.json")) {
+                const appJson = JSON.parse(fs.readFileSync("app.json", "utf8"));
+                pkgName = appJson.expo?.android?.package || appJson.android?.package || pkgName;
+              }
+            } catch(e) {}
+
+            const dummyGoogleServices = {
+              "project_info": {
+                "project_number": "123456789000",
+                "project_id": "deducia-social",
+                "storage_bucket": "deducia-social.appspot.com"
+              },
+              "client": [
+                {
+                  "client_info": {
+                    "mobilesdk_app_id": "1:123456789000:android:0123456789abcdef",
+                    "android_client_info": {
+                      "package_name": pkgName
+                    }
+                  },
+                  "oauth_client": [],
+                  "api_key": [{ "current_key": "AIzaSyDummyKeyForBuildValidationOnly123456" }],
+                  "services": {}
+                }
+              ],
+              "configuration_version": "1"
+            };
+
+            fs.writeFileSync("google-services.json", JSON.stringify(dummyGoogleServices, null, 2));
+            console.log("Generated valid google-services.json for package:", pkgName);
+          '
+
+      - name: "10. Apply Unified Deducia Master Patches"
         run: |
           cat << 'EOF' > patch_master.js
           const fs = require('fs');
@@ -397,10 +435,10 @@ jobs:
           node patch_master.js
           rm patch_master.js
 
-      - name: "10. Install Repository Dependencies"
+      - name: "11. Install Repository Dependencies"
         run: pnpm install --no-frozen-lockfile
 
-      - name: "11. Compile Lingui Localization Catalogs"
+      - name: "12. Compile Lingui Localization Catalogs"
         run: |
           pnpm run intl:build || pnpm run intl:compile || pnpm exec lingui compile || npx @lingui/cli compile || true
 
@@ -422,10 +460,10 @@ jobs:
             }
           '
 
-      - name: "12. Generate Native Android Project (Expo Clean Prebuild)"
+      - name: "13. Generate Native Android Project (Expo Clean Prebuild)"
         run: npx expo prebuild --platform android --clean
 
-      - name: "13. Overwrite Native Android Drawables & Bootsplash Icons"
+      - name: "14. Overwrite Native Android Drawables & Bootsplash Icons"
         run: |
           LOGO_SRC=""
           for candidate in ic_launcher.png IC_launcher.png ic.png IC.png logo.png LOGO.png deducia-logo.png; do
@@ -444,14 +482,14 @@ jobs:
             find android/app/src/main/res -type f \( -name "bootsplash_logo*.png" -o -name "ic_launcher*.png" \) -exec cp -f "$LOGO_SRC" "{}" \;
           fi
 
-      - name: "14. Compile Standalone Android Release APK"
+      - name: "15. Compile Standalone Android Release APK"
         run: |
           cd android
           chmod +x gradlew
           export GRADLE_OPTS="-Xmx4096m -Dfile.encoding=UTF-8"
           ./gradlew assembleRelease -x lint -x lintVitalRelease -PreactNativeArchitectures=arm64-v8a,armeabi-v7a --no-daemon
 
-      - name: "15. Locate Compiled Standalone APK"
+      - name: "16. Locate Compiled Standalone APK"
         id: find-apk
         run: |
           APK_FILE=$(find android/app/build/outputs/apk -type f -name "*.apk" ! -name "*unsigned*" | head -n 1)
@@ -461,13 +499,13 @@ jobs:
           echo "Found APK at: $APK_FILE"
           echo "apk_path=$APK_FILE" >> $GITHUB_OUTPUT
 
-      - name: "16. Upload Build Artifact"
+      - name: "17. Upload Build Artifact"
         uses: actions/upload-artifact@v4
         with:
           name: deducia-standalone-apk
           path: ${{ steps.find-apk.outputs.apk_path }}
 
-      - name: "17. Publish Official GitHub Release"
+      - name: "18. Publish Official GitHub Release"
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v1.0.0-${{ github.run_number }}
