@@ -16,7 +16,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: "1. Checkout Repository"
+      - name: "1. Checkout Clean Repository"
         uses: actions/checkout@v4
 
       - name: "2. Setup Node.js 24 Environment"
@@ -54,65 +54,53 @@ jobs:
               if (pkg.dependencies && pkg.dependencies["expo-dev-client"]) delete pkg.dependencies["expo-dev-client"];
               if (pkg.devDependencies && pkg.devDependencies["expo-dev-client"]) delete pkg.devDependencies["expo-dev-client"];
               fs.writeFileSync("package.json", JSON.stringify(pkg, null, 2));
-              console.log("Purged dev client cleanly.");
+              console.log("Purged expo-dev-client dependencies cleanly.");
             }
           '
 
-      - name: "8. Patch App Name & Black Splash in Configs"
+      - name: "8. Patch App Name and Black Splash in Configs"
         run: |
           node -e '
             const fs = require("fs");
-
-            // 1. Patch app.config.js
+            
             if (fs.existsSync("app.config.js")) {
               let config = fs.readFileSync("app.config.js", "utf8");
               config = config.replace(/name:\s*["\x27]Bluesky["\x27]/g, "name: \"Deducia\"");
               config = config.replace(/#002b75/gi, "#000000");
               fs.writeFileSync("app.config.js", config);
-              console.log("Updated app.config.js: Name=Deducia, Splash=#000000");
+              console.log("Patched app.config.js.");
             }
 
-            // 2. Patch app.json
             if (fs.existsSync("app.json")) {
               let appJson = fs.readFileSync("app.json", "utf8");
               appJson = appJson.replace(/"name":\s*"Bluesky"/g, "\"name\": \"Deducia\"");
               appJson = appJson.replace(/#002b75/gi, "#000000");
               fs.writeFileSync("app.json", appJson);
-              console.log("Updated app.json fallback.");
+              console.log("Patched app.json fallback.");
             }
           '
 
-      - name: "9. Stage Brand Assets (Fox Logo & Welcome Artwork)"
+      - name: "9. Locate and Stage Fox Logo"
         run: |
-          mkdir -p assets
+          node -e '
+            const fs = require("fs");
+            const path = require("path");
 
-          # 1. Stage Fox logo
-          LOGO_SRC=""
-          for candidate in ic_launcher.png IC_launcher.png ic.png IC.png logo.png LOGO.png deducia-logo.png; do
-            if [ -f "$candidate" ]; then
-              LOGO_SRC="$candidate"
-              break
-            fi
-          done
+            // Look for any file matching ic_launcher, ic launcher, logo, etc.
+            const files = fs.readdirSync(".");
+            const logoMatch = files.find(f => /^(ic[_\s-]?launcher|logo|ic)\.png$/i.test(f));
 
-          if [ -z "$LOGO_SRC" ]; then
-            LOGO_SRC=$(find . -maxdepth 1 -type f \( -iname "ic*.png" -o -iname "logo*.png" \) | head -n 1 | sed 's|^\./||')
-          fi
-
-          if [ -n "$LOGO_SRC" ] && [ -f "$LOGO_SRC" ]; then
-            echo "Applying Fox logo: $LOGO_SRC"
-            cp -f "$LOGO_SRC" assets/icon.png
-            cp -f "$LOGO_SRC" assets/splash.png
-            cp -f "$LOGO_SRC" assets/bootsplash_logo.png
-            cp -f "$LOGO_SRC" assets/icon-android-foreground.png
-          fi
-
-          # 2. Stage welcome artwork over cartoon park graphics
-          if [ -f "deducia-welcome.png" ]; then
-            echo "Applying deducia-welcome.png over cartoon illustrations..."
-            cp -f deducia-welcome.png assets/deducia-welcome.png
-            find assets -type f \( -iname "*wallpaper*" -o -iname "*welcome*" -o -iname "*signin*" -o -iname "*signup*" -o -iname "*park*" \) -exec cp -f deducia-welcome.png "{}" \;
-          fi
+            if (logoMatch) {
+              console.log("Found logo file:", logoMatch);
+              if (!fs.existsSync("assets")) fs.mkdirSync("assets");
+              fs.copyFileSync(logoMatch, "assets/icon.png");
+              fs.copyFileSync(logoMatch, "assets/splash.png");
+              fs.copyFileSync(logoMatch, "assets/bootsplash_logo.png");
+              fs.copyFileSync(logoMatch, "assets/icon-android-foreground.png");
+            } else {
+              console.log("Warning: No custom logo found matching pattern in root.");
+            }
+          '
 
       - name: "10. Generate Standalone Google Services Configuration"
         run: |
@@ -147,99 +135,91 @@ jobs:
             };
 
             fs.writeFileSync("google-services.json", JSON.stringify(dummyGoogleServices, null, 2));
-            console.log("Generated google-services.json.");
+            console.log("Generated google-services.json cleanly.");
           '
 
-      - name: "11. Apply Safe Brand & Palette Patches"
+      - name: "11. Apply Safe Content Isolation & Chat Unlock"
         run: |
-          cat << 'EOF' > patch_safe.js
-          const fs = require('fs');
-          const path = require('path');
+          node -e '
+            const fs = require("fs");
+            const path = require("path");
 
-          function walk(dir, callback) {
-            if (!fs.existsSync(dir)) return;
-            fs.readdirSync(dir).forEach(file => {
-              const full = path.join(dir, file);
-              if (fs.statSync(full).isDirectory()) {
-                if (!['node_modules', '.git', 'android', 'ios'].includes(file)) walk(full, callback);
-              } else {
-                callback(full, file);
+            function walk(dir, callback) {
+              if (!fs.existsSync(dir)) return;
+              fs.readdirSync(dir).forEach(file => {
+                const full = path.join(dir, file);
+                if (fs.statSync(full).isDirectory()) {
+                  if (!["node_modules", ".git", "android", "ios"].includes(file)) walk(full, callback);
+                } else {
+                  callback(full, file);
+                }
+              });
+            }
+
+            // 1. Lock Server Endpoints in constants.ts
+            walk("src/lib", (full, file) => {
+              if (/constants\.(ts|js)$/.test(file)) {
+                let code = fs.readFileSync(full, "utf8");
+                code = code.replace(/BSKY_SERVICE\s*=\s*[\x27"][^\x27"]+[\x27"]/g, "BSKY_SERVICE = \"https://pds.deducia.com\"");
+                code = code.replace(/DEFAULT_SERVICE\s*=\s*[^;\n]+/g, "DEFAULT_SERVICE = \"https://pds.deducia.com\"");
+                code = code.replace(/BSKY_SERVICE_DID\s*=\s*[\x27"][^\x27"]+[\x27"]/g, "BSKY_SERVICE_DID = \"did:web:pds.deducia.com\"");
+                fs.writeFileSync(full, code);
+                console.log("Locked server to pds.deducia.com in:", full);
               }
             });
-          }
 
-          // A. Convert Fox logo to Base64 data URI for safe React Native rendering
-          let logoBase64 = '';
-          for (const f of ['ic_launcher.png', 'deducia-logo.png', 'ic.png', 'logo.png']) {
-            if (fs.existsSync(f)) {
-              logoBase64 = 'data:image/png;base64,' + fs.readFileSync(f).toString('base64');
-              console.log('Loaded Fox logo into Base64 from:', f);
-              break;
-            }
-          }
-
-          // B. Replace Top Bar Header Butterfly with Fox Logo
-          walk('src', (full, file) => {
-            if (file === 'Butterfly.tsx' || file === 'Butterfly.js') {
-              const safeButterfly = `
-                import React from "react";
-                import { Image } from "react-native";
-                const LOGO_URI = "${logoBase64}";
-                export function Butterfly({ width = 36, height, style }: any) {
-                  const size = width || 36;
-                  if (!LOGO_URI) return null;
-                  return (
-                    <Image
-                      source={{ uri: LOGO_URI }}
-                      style={[{ width: size, height: height || size, resizeMode: "contain" }, style]}
-                    />
-                  );
+            // 2. Safe Feed Isolation: Filter posts inside post-feed.ts
+            walk("src/state/queries", (full, file) => {
+              if (file === "post-feed.ts" || file === "post-feed.js") {
+                let code = fs.readFileSync(full, "utf8");
+                const target = "const res = await api.fetch({cursor, limit: fetchLimit})";
+                if (code.includes(target) && !code.includes(".filter(item => item?.post?.author?.handle")) {
+                  const replacement = target + "\n      res.feed = res.feed.filter(item => item?.post?.author?.handle?.endsWith(\".deducia.com\") || item?.post?.author?.handle === \"deducia.com\");";
+                  code = code.replace(target, replacement);
+                  fs.writeFileSync(full, code);
+                  console.log("Injected safe post filtering into:", full);
                 }
-                export const Logo = Butterfly;
-                export default Butterfly;
-              `;
-              fs.writeFileSync(full, safeButterfly);
-              console.log('Replaced Butterfly component with Fox logo in:', full);
-            }
-          });
+              }
+            });
 
-          // C. Lock Server Endpoints in constants.ts
-          walk('src/lib', (full, file) => {
-            if (/constants\.(ts|js)$/.test(file)) {
-              let code = fs.readFileSync(full, 'utf8');
-              code = code.replace(/BSKY_SERVICE\s*=\s*['"][^'"]+['"]/g, 'BSKY_SERVICE = "https://pds.deducia.com"');
-              code = code.replace(/DEFAULT_SERVICE\s*=\s*[^;\n]+/g, 'DEFAULT_SERVICE = "https://pds.deducia.com"');
-              code = code.replace(/BSKY_SERVICE_DID\s*=\s*['"][^'"]+['"]/g, 'BSKY_SERVICE_DID = "did:web:pds.deducia.com"');
-              code = code.replace(/HELP_DESK_URL\s*=\s*`[^`]+`/g, 'HELP_DESK_URL = "https://social.deducia.com"');
-              code = code.replace(/HELP_DESK_URL\s*=\s*['"][^'"]+['"]/g, 'HELP_DESK_URL = "https://social.deducia.com"');
-              code = code.replace(/BSKY_DOWNLOAD_URL\s*=\s*['"][^'"]+['"]/g, 'BSKY_DOWNLOAD_URL = "https://social.deducia.com"');
-              code = code.replace(/STATUS_PAGE_URL\s*=\s*['"][^'"]+['"]/g, 'STATUS_PAGE_URL = "https://social.deducia.com"');
-              code = code.replace(/webLinks\s*=\s*\{[^}]+\}/gs, 'webLinks = { tos: "https://social.deducia.com", privacy: "https://social.deducia.com", community: "https://social.deducia.com", communityDeprecated: "https://social.deducia.com" }');
-              fs.writeFileSync(full, code);
-              console.log('Locked PDS to pds.deducia.com in constants.ts');
-            }
-          });
+            // 3. Prohibit Third-Party Suggested Follows
+            walk("src/state/queries", (full, file) => {
+              if (file === "suggested-follows.ts" || file === "suggested-follows.js") {
+                let code = fs.readFileSync(full, "utf8");
+                code = code.replace(/const suggestions = data\.suggestions\.filter\([^)]+\)/g, "const suggestions = []");
+                code = code.replace(/suggestions:\s*data\.suggestions/g, "suggestions: []");
+                fs.writeFileSync(full, code);
+                console.log("Prohibited outside suggestions in:", full);
+              }
+            });
 
-          // D. OLED Pure Black Palette Tokens
-          walk('src/alf', (full, file) => {
-            if (file === 'tokens.ts') {
-              let tokens = fs.readFileSync(full, 'utf8');
-              tokens = tokens.replace(/blue_500:\s*['"][^'"]+['"]/g, 'blue_500: "#ffffff"');
-              tokens = tokens.replace(/blue_600:\s*['"][^'"]+['"]/g, 'blue_600: "#e5e5e5"');
-              tokens = tokens.replace(/blue_400:\s*['"][^'"]+['"]/g, 'blue_400: "#ffffff"');
-              tokens = tokens.replace(/slate_950:\s*['"][^'"]+['"]/g, 'slate_950: "#000000"');
-              tokens = tokens.replace(/slate_900:\s*['"][^'"]+['"]/g, 'slate_900: "#000000"');
-              tokens = tokens.replace(/slate_850:\s*['"][^'"]+['"]/g, 'slate_850: "#000000"');
-              tokens = tokens.replace(/slate_800:\s*['"][^'"]+['"]/g, 'slate_800: "#121212"');
-              fs.writeFileSync(full, tokens);
-              console.log('Updated design tokens to OLED black in:', full);
-            }
-          });
+            // 4. Restrict Search Results to deducia.com handles
+            walk("src/state/queries", (full, file) => {
+              if (file === "actor-search.ts" || file === "actor-search.js") {
+                let code = fs.readFileSync(full, "utf8");
+                const target = "const res = await client.call(app.bsky.actor.searchActors";
+                if (code.includes(target) && !code.includes("res.actors = res.actors.filter")) {
+                  code = code.replace(/return\s*\{\s*items:\s*res\.actors/g, "res.actors = res.actors.filter(a => a?.handle?.endsWith(\".deducia.com\") || a?.handle === \"deducia.com\");\n      return { items: res.actors");
+                  fs.writeFileSync(full, code);
+                  console.log("Restricted actor search in:", full);
+                }
+              }
+            });
 
-          console.log('Safe branding applied cleanly.');
-          EOF
-          node patch_safe.js
-          rm patch_safe.js
+            // 5. Bypass Age Assurance on Chats Safely
+            walk("src/ageAssurance", (full, file) => {
+              if (file === "state.ts" || file === "state.tsx") {
+                let code = fs.readFileSync(full, "utf8");
+                code = code.replace(/canAccessChat:\s*false/g, "canAccessChat: true");
+                code = code.replace(/status:\s*['"]error['"]/g, "status: \"ready\"");
+                code = code.replace(/status:\s*['"]pending['"]/g, "status: \"ready\"");
+                code = code.replace(/isVerified:\s*false/g, "isVerified: true");
+                code = code.replace(/isEligible:\s*false/g, "isEligible: true");
+                fs.writeFileSync(full, code);
+                console.log("Safely enabled Chat / Age Assurance in:", full);
+              }
+            });
+          '
 
       - name: "12. Install Repository Dependencies"
         run: pnpm install --no-frozen-lockfile
@@ -269,39 +249,45 @@ jobs:
       - name: "14. Generate Native Android Project (Expo Clean Prebuild)"
         run: npx expo prebuild --platform android --clean
 
-      - name: "15. Enforce Native App Name, Black Splash & Fox Logo Drawables"
+      - name: "15. Enforce Native Android Assets & Drawables"
         run: |
-          # 1. Enforce App Name in native strings.xml
+          # 1. Enforce App Name in strings.xml
           STRINGS_FILE="android/app/src/main/res/values/strings.xml"
           if [ -f "$STRINGS_FILE" ]; then
             sed -i 's|<string name="app_name">.*</string>|<string name="app_name">Deducia</string>|g' "$STRINGS_FILE"
             echo "Enforced Deducia in strings.xml"
           fi
 
-          # 2. Enforce Black Background in native colors.xml
+          # 2. Enforce Black Background in colors.xml
           COLORS_FILE="android/app/src/main/res/values/colors.xml"
           if [ -f "$COLORS_FILE" ]; then
             sed -i 's|<color name="bootsplash_background">.*</color>|<color name="bootsplash_background">#000000</color>|g' "$COLORS_FILE"
             echo "Enforced #000000 in colors.xml"
           fi
 
-          # 3. Directly overwrite bootsplash and launcher drawables with Fox logo
-          LOGO_SRC=""
-          for candidate in ic_launcher.png IC_launcher.png ic.png IC.png logo.png LOGO.png deducia-logo.png; do
-            if [ -f "$candidate" ]; then
-              LOGO_SRC="$candidate"
-              break
-            fi
-          done
+          # 3. Direct overwrite of bootsplash & launcher icons
+          node -e '
+            const fs = require("fs");
+            const path = require("path");
 
-          if [ -z "$LOGO_SRC" ]; then
-            LOGO_SRC=$(find . -maxdepth 1 -type f \( -iname "ic*.png" -o -iname "logo*.png" \) | head -n 1 | sed 's|^\./||')
-          fi
+            const files = fs.readdirSync(".");
+            const logoMatch = files.find(f => /^(ic[_\s-]?launcher|logo|ic)\.png$/i.test(f));
 
-          if [ -n "$LOGO_SRC" ] && [ -f "$LOGO_SRC" ]; then
-            echo "Overwriting native Android drawables with Fox logo: $LOGO_SRC..."
-            find android/app/src/main/res -type f \( -name "bootsplash_logo*.png" -o -name "ic_launcher*.png" \) -exec cp -f "$LOGO_SRC" "{}" \;
-          fi
+            if (logoMatch && fs.existsSync("android/app/src/main/res")) {
+              console.log("Replacing native drawables with:", logoMatch);
+              function walkDir(dir) {
+                fs.readdirSync(dir).forEach(file => {
+                  const full = path.join(dir, file);
+                  if (fs.statSync(full).isDirectory()) {
+                    walkDir(full);
+                  } else if (/^(bootsplash_logo|ic_launcher).*\.png$/i.test(file)) {
+                    fs.copyFileSync(logoMatch, full);
+                  }
+                });
+              }
+              walkDir("android/app/src/main/res");
+            }
+          '
 
       - name: "16. Compile Standalone Android Release APK"
         run: |
@@ -331,7 +317,7 @@ jobs:
         with:
           tag_name: v1.0.0-${{ github.run_number }}
           name: "Deducia Social v1.0.0 (Build ${{ github.run_number }})"
-          body: "Official standalone release of Deducia. Fox logo bootsplash on solid black, Fox top bar icon, OLED black palette, and PDS pointed to pds.deducia.com."
+          body: "Official standalone release of Deducia. Feeds isolated to @*.deducia.com, chats unlocked, and branding updated."
           files: ${{ steps.find-apk.outputs.apk_path }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
