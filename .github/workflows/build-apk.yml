@@ -84,9 +84,6 @@ jobs:
         run: |
           node -e '
             const fs = require("fs");
-            const path = require("path");
-
-            // Look for any file matching ic_launcher, ic launcher, logo, etc.
             const files = fs.readdirSync(".");
             const logoMatch = files.find(f => /^(ic[_\s-]?launcher|logo|ic)\.png$/i.test(f));
 
@@ -140,86 +137,88 @@ jobs:
 
       - name: "11. Apply Safe Content Isolation & Chat Unlock"
         run: |
-          node -e '
-            const fs = require("fs");
-            const path = require("path");
+          cat << 'EOF' > patch_isolation.js
+          const fs = require('fs');
+          const path = require('path');
 
-            function walk(dir, callback) {
-              if (!fs.existsSync(dir)) return;
-              fs.readdirSync(dir).forEach(file => {
-                const full = path.join(dir, file);
-                if (fs.statSync(full).isDirectory()) {
-                  if (!["node_modules", ".git", "android", "ios"].includes(file)) walk(full, callback);
-                } else {
-                  callback(full, file);
-                }
-              });
+          function walk(dir, callback) {
+            if (!fs.existsSync(dir)) return;
+            fs.readdirSync(dir).forEach(file => {
+              const full = path.join(dir, file);
+              if (fs.statSync(full).isDirectory()) {
+                if (!['node_modules', '.git', 'android', 'ios'].includes(file)) walk(full, callback);
+              } else {
+                callback(full, file);
+              }
+            });
+          }
+
+          // 1. Lock Server Endpoints in constants.ts
+          walk('src/lib', (full, file) => {
+            if (/constants\.(ts|js)$/.test(file)) {
+              let code = fs.readFileSync(full, 'utf8');
+              code = code.replace(/BSKY_SERVICE\s*=\s*['"][^'"]+['"]/g, 'BSKY_SERVICE = "https://pds.deducia.com"');
+              code = code.replace(/DEFAULT_SERVICE\s*=\s*[^;\n]+/g, 'DEFAULT_SERVICE = "https://pds.deducia.com"');
+              code = code.replace(/BSKY_SERVICE_DID\s*=\s*['"][^'"]+['"]/g, 'BSKY_SERVICE_DID = "did:web:pds.deducia.com"');
+              fs.writeFileSync(full, code);
+              console.log('Locked server to pds.deducia.com in:', full);
             }
+          });
 
-            // 1. Lock Server Endpoints in constants.ts
-            walk("src/lib", (full, file) => {
-              if (/constants\.(ts|js)$/.test(file)) {
-                let code = fs.readFileSync(full, "utf8");
-                code = code.replace(/BSKY_SERVICE\s*=\s*[\x27"][^\x27"]+[\x27"]/g, "BSKY_SERVICE = \"https://pds.deducia.com\"");
-                code = code.replace(/DEFAULT_SERVICE\s*=\s*[^;\n]+/g, "DEFAULT_SERVICE = \"https://pds.deducia.com\"");
-                code = code.replace(/BSKY_SERVICE_DID\s*=\s*[\x27"][^\x27"]+[\x27"]/g, "BSKY_SERVICE_DID = \"did:web:pds.deducia.com\"");
+          // 2. Safe Feed Isolation: Filter posts inside post-feed.ts
+          walk('src/state/queries', (full, file) => {
+            if (file === 'post-feed.ts' || file === 'post-feed.js') {
+              let code = fs.readFileSync(full, 'utf8');
+              const target = 'const res = await api.fetch({cursor, limit: fetchLimit})';
+              if (code.includes(target) && !code.includes('.filter(item => item?.post?.author?.handle')) {
+                const replacement = target + '\n      res.feed = res.feed.filter(item => item?.post?.author?.handle?.endsWith(".deducia.com") || item?.post?.author?.handle === "deducia.com");';
+                code = code.replace(target, replacement);
                 fs.writeFileSync(full, code);
-                console.log("Locked server to pds.deducia.com in:", full);
+                console.log('Injected safe post filtering into:', full);
               }
-            });
+            }
+          });
 
-            // 2. Safe Feed Isolation: Filter posts inside post-feed.ts
-            walk("src/state/queries", (full, file) => {
-              if (file === "post-feed.ts" || file === "post-feed.js") {
-                let code = fs.readFileSync(full, "utf8");
-                const target = "const res = await api.fetch({cursor, limit: fetchLimit})";
-                if (code.includes(target) && !code.includes(".filter(item => item?.post?.author?.handle")) {
-                  const replacement = target + "\n      res.feed = res.feed.filter(item => item?.post?.author?.handle?.endsWith(\".deducia.com\") || item?.post?.author?.handle === \"deducia.com\");";
-                  code = code.replace(target, replacement);
-                  fs.writeFileSync(full, code);
-                  console.log("Injected safe post filtering into:", full);
-                }
-              }
-            });
+          // 3. Prohibit Third-Party Suggested Follows
+          walk('src/state/queries', (full, file) => {
+            if (file === 'suggested-follows.ts' || file === 'suggested-follows.js') {
+              let code = fs.readFileSync(full, 'utf8');
+              code = code.replace(/const suggestions = data\.suggestions\.filter\([^)]+\)/g, 'const suggestions = []');
+              code = code.replace(/suggestions:\s*data\.suggestions/g, 'suggestions: []');
+              fs.writeFileSync(full, code);
+              console.log('Prohibited outside suggestions in:', full);
+            }
+          });
 
-            // 3. Prohibit Third-Party Suggested Follows
-            walk("src/state/queries", (full, file) => {
-              if (file === "suggested-follows.ts" || file === "suggested-follows.js") {
-                let code = fs.readFileSync(full, "utf8");
-                code = code.replace(/const suggestions = data\.suggestions\.filter\([^)]+\)/g, "const suggestions = []");
-                code = code.replace(/suggestions:\s*data\.suggestions/g, "suggestions: []");
+          // 4. Restrict Search Results to deducia.com handles
+          walk('src/state/queries', (full, file) => {
+            if (file === 'actor-search.ts' || file === 'actor-search.js') {
+              let code = fs.readFileSync(full, 'utf8');
+              const target = 'const res = await client.call(app.bsky.actor.searchActors';
+              if (code.includes(target) && !code.includes('res.actors = res.actors.filter')) {
+                code = code.replace(/return\s*\{\s*items:\s*res\.actors/g, 'res.actors = res.actors.filter(a => a?.handle?.endsWith(".deducia.com") || a?.handle === "deducia.com");\n      return { items: res.actors');
                 fs.writeFileSync(full, code);
-                console.log("Prohibited outside suggestions in:", full);
+                console.log('Restricted actor search in:', full);
               }
-            });
+            }
+          });
 
-            // 4. Restrict Search Results to deducia.com handles
-            walk("src/state/queries", (full, file) => {
-              if (file === "actor-search.ts" || file === "actor-search.js") {
-                let code = fs.readFileSync(full, "utf8");
-                const target = "const res = await client.call(app.bsky.actor.searchActors";
-                if (code.includes(target) && !code.includes("res.actors = res.actors.filter")) {
-                  code = code.replace(/return\s*\{\s*items:\s*res\.actors/g, "res.actors = res.actors.filter(a => a?.handle?.endsWith(\".deducia.com\") || a?.handle === \"deducia.com\");\n      return { items: res.actors");
-                  fs.writeFileSync(full, code);
-                  console.log("Restricted actor search in:", full);
-                }
-              }
-            });
-
-            // 5. Bypass Age Assurance on Chats Safely
-            walk("src/ageAssurance", (full, file) => {
-              if (file === "state.ts" || file === "state.tsx") {
-                let code = fs.readFileSync(full, "utf8");
-                code = code.replace(/canAccessChat:\s*false/g, "canAccessChat: true");
-                code = code.replace(/status:\s*['"]error['"]/g, "status: \"ready\"");
-                code = code.replace(/status:\s*['"]pending['"]/g, "status: \"ready\"");
-                code = code.replace(/isVerified:\s*false/g, "isVerified: true");
-                code = code.replace(/isEligible:\s*false/g, "isEligible: true");
-                fs.writeFileSync(full, code);
-                console.log("Safely enabled Chat / Age Assurance in:", full);
-              }
-            });
-          '
+          // 5. Bypass Age Assurance on Chats Safely
+          walk('src/ageAssurance', (full, file) => {
+            if (file === 'state.ts' || file === 'state.tsx') {
+              let code = fs.readFileSync(full, 'utf8');
+              code = code.replace(/canAccessChat:\s*false/g, 'canAccessChat: true');
+              code = code.replace(/status:\s*['"]error['"]/g, 'status: "ready"');
+              code = code.replace(/status:\s*['"]pending['"]/g, 'status: "ready"');
+              code = code.replace(/isVerified:\s*false/g, 'isVerified: true');
+              code = code.replace(/isEligible:\s*false/g, 'isEligible: true');
+              fs.writeFileSync(full, code);
+              console.log('Safely enabled Chat / Age Assurance in:', full);
+            }
+          });
+          EOF
+          node patch_isolation.js
+          rm patch_isolation.js
 
       - name: "12. Install Repository Dependencies"
         run: pnpm install --no-frozen-lockfile
