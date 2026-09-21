@@ -94,6 +94,13 @@ jobs:
               fs.copyFileSync(logoMatch, "assets/splash.png");
               fs.copyFileSync(logoMatch, "assets/bootsplash_logo.png");
               fs.copyFileSync(logoMatch, "assets/icon-android-foreground.png");
+              
+              // Also overwrite any butterfly or logo assets in assets folder
+              fs.readdirSync("assets").forEach(f => {
+                if (/butterfly|logo/i.test(f) && f.endsWith(".png")) {
+                  fs.copyFileSync(logoMatch, "assets/" + f);
+                }
+              });
             } else {
               console.log("Warning: No custom logo found matching pattern in root.");
             }
@@ -135,9 +142,9 @@ jobs:
             console.log("Generated google-services.json cleanly.");
           '
 
-      - name: "11. Apply Safe Content Isolation & Chat Unlock"
+      - name: "11. Apply Deducia Isolation, Header Logo & Chat Unlock"
         run: |
-          cat << 'EOF' > patch_isolation.js
+          cat << 'EOF' > patch_step.js
           const fs = require('fs');
           const path = require('path');
 
@@ -153,7 +160,41 @@ jobs:
             });
           }
 
-          // 1. Lock Server Endpoints in constants.ts
+          // A. Load Fox Logo into Base64 for React Native header rendering
+          let logoBase64 = '';
+          const files = fs.readdirSync('.');
+          const logoMatch = files.find(f => /^(ic[_\s-]?launcher|logo|ic)\.png$/i.test(f));
+          if (logoMatch) {
+            logoBase64 = 'data:image/png;base64,' + fs.readFileSync(logoMatch).toString('base64');
+            console.log('Loaded Fox logo into Base64.');
+          }
+
+          // B. Replace Top Bar Header Butterfly & Logo with Fox Logo
+          walk('src', (full, file) => {
+            if (file === 'Butterfly.tsx' || file === 'Butterfly.js' || file === 'Logo.tsx' || file === 'Logo.js') {
+              const safeHeaderLogo = `
+                import React from "react";
+                import { Image } from "react-native";
+                const LOGO_URI = "${logoBase64}";
+                export function Butterfly({ width = 32, height, style }: any) {
+                  const size = width || 32;
+                  if (!LOGO_URI) return null;
+                  return (
+                    <Image
+                      source={{ uri: LOGO_URI }}
+                      style={[{ width: size, height: height || size, resizeMode: "contain" }, style]}
+                    />
+                  );
+                }
+                export const Logo = Butterfly;
+                export default Butterfly;
+              `;
+              fs.writeFileSync(full, safeHeaderLogo);
+              console.log('Replaced Header Logo component in:', full);
+            }
+          });
+
+          // C. Lock Server Endpoints in constants.ts
           walk('src/lib', (full, file) => {
             if (/constants\.(ts|js)$/.test(file)) {
               let code = fs.readFileSync(full, 'utf8');
@@ -165,47 +206,69 @@ jobs:
             }
           });
 
-          // 2. Safe Feed Isolation: Filter posts inside post-feed.ts
+          // D. Bulletproof Feed Isolation & Eliminate Infinite Spinner
           walk('src/state/queries', (full, file) => {
             if (file === 'post-feed.ts' || file === 'post-feed.js') {
               let code = fs.readFileSync(full, 'utf8');
-              const target = 'const res = await api.fetch({cursor, limit: fetchLimit})';
-              if (code.includes(target) && !code.includes('.filter(item => item?.post?.author?.handle')) {
-                const replacement = target + '\n      res.feed = res.feed.filter(item => item?.post?.author?.handle?.endsWith(".deducia.com") || item?.post?.author?.handle === "deducia.com");';
-                code = code.replace(target, replacement);
+              if (!code.includes('isDeduciaHandle')) {
+                const helper = `
+                  const isDeduciaHandle = (handle) => {
+                    if (!handle) return false;
+                    return handle.endsWith('.deducia.com') || handle === 'deducia.com';
+                  };
+                `;
+                // Add helper at top
+                code = helper + code;
+
+                // Safely filter any returned feed items and reset cursor when empty
+                code = code.replace(
+                  /feed:\s*res\.data\.feed/g,
+                  'feed: (res.data.feed || []).filter(item => isDeduciaHandle(item?.post?.author?.handle)), cursor: ((res.data.feed || []).filter(item => isDeduciaHandle(item?.post?.author?.handle)).length > 0 ? res.data.cursor : undefined)'
+                );
+                code = code.replace(
+                  /feed:\s*data\.feed/g,
+                  'feed: (data.feed || []).filter(item => isDeduciaHandle(item?.post?.author?.handle)), cursor: ((data.feed || []).filter(item => isDeduciaHandle(item?.post?.author?.handle)).length > 0 ? data.cursor : undefined)'
+                );
                 fs.writeFileSync(full, code);
-                console.log('Injected safe post filtering into:', full);
+                console.log('Injected bulletproof feed isolation and killed infinite spinner in:', full);
               }
             }
           });
 
-          // 3. Prohibit Third-Party Suggested Follows
+          // E. Remove Explore Recommendations, Trending & Starter Packs
           walk('src/state/queries', (full, file) => {
             if (file === 'suggested-follows.ts' || file === 'suggested-follows.js') {
               let code = fs.readFileSync(full, 'utf8');
-              code = code.replace(/const suggestions = data\.suggestions\.filter\([^)]+\)/g, 'const suggestions = []');
-              code = code.replace(/suggestions:\s*data\.suggestions/g, 'suggestions: []');
+              code = code.replace(/data\.suggestions/g, '[]');
+              code = code.replace(/suggestions:\s*[^,\n}]+/g, 'suggestions: []');
               fs.writeFileSync(full, code);
-              console.log('Prohibited outside suggestions in:', full);
-            }
-          });
-
-          // 4. Restrict Search Results to deducia.com handles
-          walk('src/state/queries', (full, file) => {
-            if (file === 'actor-search.ts' || file === 'actor-search.js') {
+              console.log('Cleared suggested follows in:', full);
+            } else if (file === 'starter-packs.ts' || file === 'starter-packs.js') {
               let code = fs.readFileSync(full, 'utf8');
-              const target = 'const res = await client.call(app.bsky.actor.searchActors';
-              if (code.includes(target) && !code.includes('res.actors = res.actors.filter')) {
-                code = code.replace(/return\s*\{\s*items:\s*res\.actors/g, 'res.actors = res.actors.filter(a => a?.handle?.endsWith(".deducia.com") || a?.handle === "deducia.com");\n      return { items: res.actors');
+              code = code.replace(/starterPacks:\s*[^,\n}]+/g, 'starterPacks: []');
+              code = code.replace(/items:\s*[^,\n}]+/g, 'items: []');
+              fs.writeFileSync(full, code);
+              console.log('Cleared starter packs in:', full);
+            } else if (file.includes('trending') && /\.(ts|js)$/.test(file)) {
+              let code = fs.readFileSync(full, 'utf8');
+              code = code.replace(/topics:\s*[^,\n}]+/g, 'topics: []');
+              code = code.replace(/items:\s*[^,\n}]+/g, 'items: []');
+              fs.writeFileSync(full, code);
+              console.log('Cleared trending queries in:', full);
+            } else if (file === 'actor-search.ts' || file === 'actor-search.js') {
+              let code = fs.readFileSync(full, 'utf8');
+              if (!code.includes('isDeduciaHandle')) {
+                code = `const isDeduciaHandle = (h) => Boolean(h && (h.endsWith('.deducia.com') || h === 'deducia.com'));\n` + code;
+                code = code.replace(/items:\s*res\.actors/g, 'items: (res.actors || []).filter(a => isDeduciaHandle(a?.handle))');
                 fs.writeFileSync(full, code);
-                console.log('Restricted actor search in:', full);
+                console.log('Restricted actor search to deducia.com in:', full);
               }
             }
           });
 
-          // 5. Bypass Age Assurance on Chats Safely
-          walk('src/ageAssurance', (full, file) => {
-            if (file === 'state.ts' || file === 'state.tsx') {
+          // F. Unblock Age Assurance on Chats (Hyphen & CamelCase matching)
+          walk('src', (full, file) => {
+            if (/age[-_]?assurance/i.test(full) || /AgeAssurance/i.test(file)) {
               let code = fs.readFileSync(full, 'utf8');
               code = code.replace(/canAccessChat:\s*false/g, 'canAccessChat: true');
               code = code.replace(/status:\s*['"]error['"]/g, 'status: "ready"');
@@ -213,12 +276,30 @@ jobs:
               code = code.replace(/isVerified:\s*false/g, 'isVerified: true');
               code = code.replace(/isEligible:\s*false/g, 'isEligible: true');
               fs.writeFileSync(full, code);
-              console.log('Safely enabled Chat / Age Assurance in:', full);
+              console.log('Unblocked Age Assurance in:', full);
             }
           });
+
+          // G. Neutralize Gate Component in Messages
+          walk('src/screens/Messages', (full, file) => {
+            if (/gate/i.test(file) && /\.(tsx|jsx)$/.test(file)) {
+              const cleanGate = `
+                import React from "react";
+                export function Gate({ children }: any) {
+                  return children;
+                }
+                export const AgeAssuranceGate = Gate;
+                export default Gate;
+              `;
+              fs.writeFileSync(full, cleanGate);
+              console.log('Replaced Messages Gate component in:', full);
+            }
+          });
+
+          console.log('All patches applied cleanly.');
           EOF
-          node patch_isolation.js
-          rm patch_isolation.js
+          node patch_step.js
+          rm patch_step.js
 
       - name: "12. Install Repository Dependencies"
         run: pnpm install --no-frozen-lockfile
@@ -250,21 +331,18 @@ jobs:
 
       - name: "15. Enforce Native Android Assets & Drawables"
         run: |
-          # 1. Enforce App Name in strings.xml
           STRINGS_FILE="android/app/src/main/res/values/strings.xml"
           if [ -f "$STRINGS_FILE" ]; then
             sed -i 's|<string name="app_name">.*</string>|<string name="app_name">Deducia</string>|g' "$STRINGS_FILE"
             echo "Enforced Deducia in strings.xml"
           fi
 
-          # 2. Enforce Black Background in colors.xml
           COLORS_FILE="android/app/src/main/res/values/colors.xml"
           if [ -f "$COLORS_FILE" ]; then
             sed -i 's|<color name="bootsplash_background">.*</color>|<color name="bootsplash_background">#000000</color>|g' "$COLORS_FILE"
             echo "Enforced #000000 in colors.xml"
           fi
 
-          # 3. Direct overwrite of bootsplash & launcher icons
           node -e '
             const fs = require("fs");
             const path = require("path");
@@ -316,7 +394,7 @@ jobs:
         with:
           tag_name: v1.0.0-${{ github.run_number }}
           name: "Deducia Social v1.0.0 (Build ${{ github.run_number }})"
-          body: "Official standalone release of Deducia. Feeds isolated to @*.deducia.com, chats unlocked, and branding updated."
+          body: "Official standalone release of Deducia. Feeds isolated to @*.deducia.com, chat unlocked, Fox header logo active, and infinite spinner loop eliminated."
           files: ${{ steps.find-apk.outputs.apk_path }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
